@@ -1,0 +1,17 @@
+version: "3.8"
+services:
+  event-alert-bot:
+    build: .
+    restart: unless-stopped
+    environment:
+      - RPC_WS_URL=${RPC_WS_URL}
+      - RPC_HTTP_URL=${RPC_HTTP_URL}
+      - CHAIN_NAME=${CHAIN_NAME}
+      - EXPLORER_BASE=${EXPLORER_BASE}
+      - VAULT_ADDRESS=${VAULT_ADDRESS}
+      - BACKFILL_BLOCKS=${BACKFILL_BLOCKS}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
+      - MIN_MS_BETWEEN_MSGS=${MIN_MS_BETWEEN_MSGS}
+

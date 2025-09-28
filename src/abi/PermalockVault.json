@@ -1,0 +1,82 @@
+[
+  { "type":"event","name":"DepositedAERO","inputs":[
+    {"indexed":true,"name":"user","type":"address"},
+    {"indexed":false,"name":"aeroAmount","type":"uint256"},
+    {"indexed":false,"name":"iAeroToUser","type":"uint256"},
+    {"indexed":false,"name":"iAeroToTreasury","type":"uint256"},
+    {"indexed":false,"name":"liqMinted","type":"uint256"}
+  ]},
+  { "type":"event","name":"DepositedVeNFT","inputs":[
+    {"indexed":true,"name":"user","type":"address"},
+    {"indexed":true,"name":"tokenId","type":"uint256"},
+    {"indexed":false,"name":"aeroAmount","type":"uint256"},
+    {"indexed":false,"name":"iAeroToUser","type":"uint256"},
+    {"indexed":false,"name":"iAeroToTreasury","type":"uint256"},
+    {"indexed":false,"name":"liqMinted","type":"uint256"}
+  ]},
+  { "type":"event","name":"NFTIncreased","inputs":[
+    {"indexed":true,"name":"tokenId","type":"uint256"},
+    {"indexed":false,"name":"amount","type":"uint256"}
+  ]},
+  { "type":"event","name":"NFTsMerged","inputs":[
+    {"indexed":true,"name":"fromId","type":"uint256"},
+    {"indexed":true,"name":"toId","type":"uint256"}
+  ]},
+  { "type":"event","name":"NFTRebased","inputs":[
+    {"indexed":true,"name":"tokenId","type":"uint256"},
+    {"indexed":false,"name":"newUnlockTime","type":"uint256"}
+  ]},
+  { "type":"event","name":"HalvingReached","inputs":[
+    {"indexed":false,"name":"halvingIndex","type":"uint256"},
+    {"indexed":false,"name":"totalMinted","type":"uint256"}
+  ]},
+  { "type":"event","name":"EmissionRateUpdated","inputs":[
+    {"indexed":false,"name":"newRate","type":"uint256"}
+  ]},
+  { "type":"event","name":"MaintenancePerformed","inputs":[
+    {"indexed":false,"name":"merged","type":"bool"},
+    {"indexed":false,"name":"rebased","type":"bool"}
+  ]},
+  { "type":"event","name":"EmergencyPauseSet","inputs":[
+    {"indexed":false,"name":"paused","type":"bool"}
+  ]},
+  { "type":"event","name":"AuthorizedSet","inputs":[
+    {"indexed":true,"name":"account","type":"address"},
+    {"indexed":false,"name":"authorized","type":"bool"}
+  ]},
+  { "type":"event","name":"AuthorizedTargetSet","inputs":[
+    {"indexed":true,"name":"target","type":"address"},
+    {"indexed":false,"name":"authorized","type":"bool"}
+  ]},
+  { "type":"event","name":"KeeperSet","inputs":[
+    {"indexed":true,"name":"keeper","type":"address"}
+  ]},
+  { "type":"event","name":"VotingManagerSet","inputs":[
+    {"indexed":true,"name":"manager","type":"address"}
+  ]},
+  { "type":"event","name":"RewardsCollectorSet","inputs":[
+    {"indexed":true,"name":"collector","type":"address"}
+  ]},
+  { "type":"event","name":"LIQMinted","inputs":[
+    {"indexed":true,"name":"user","type":"address"},
+    {"indexed":false,"name":"toUser","type":"uint256"},
+    {"indexed":false,"name":"toTreasury","type":"uint256"}
+  ]},
+  { "type":"event","name":"RescueSafeSet","inputs":[
+    {"indexed":true,"name":"safe","type":"address"}
+  ]},
+  { "type":"event","name":"ManagedRescueProposed","inputs":[
+    {"indexed":true,"name":"tokenId","type":"uint256"},
+    {"indexed":true,"name":"to","type":"address"},
+    {"indexed":false,"name":"eta","type":"uint64"},
+    {"indexed":false,"name":"reason","type":"string"}
+  ]},
+  { "type":"event","name":"ManagedRescueCancelled","inputs":[
+    {"indexed":true,"name":"tokenId","type":"uint256"}
+  ]},
+  { "type":"event","name":"ManagedRescueExecuted","inputs":[
+    {"indexed":true,"name":"tokenId","type":"uint256"},
+    {"indexed":true,"name":"to","type":"address"}
+  ]}
+]
+
