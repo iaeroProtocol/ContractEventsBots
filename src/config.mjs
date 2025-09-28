@@ -1,4 +1,8 @@
-import 'dotenv/config';
+if (process.env.NODE_ENV !== 'production') {
+  try {
+    await import('dotenv/config');
+  } catch {}
+}
 import fs from 'node:fs';
 
 function req(name, fallback = undefined) {
