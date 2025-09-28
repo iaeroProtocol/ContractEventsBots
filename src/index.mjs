@@ -1,4 +1,9 @@
-import 'dotenv/config';
+if (process.env.NODE_ENV !== 'production') {
+  try {
+    await import('dotenv/config');
+  } catch {}
+}
+
 import { CONFIG } from './config.mjs';
 import { startWatcher } from './watcher.mjs';
 
