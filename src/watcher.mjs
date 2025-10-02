@@ -41,7 +41,7 @@ function decodeSwapFromTopicsAndData(log) {
     return { kind: 'v2-classic', sender, to, amount0In, amount1In, amount0Out, amount1Out };
   }
 
-  // V3
+  // V3 / CLAMM
   if (t0 === TOPIC_V3) {
     const sender    = addrFromTopic(log.topics[1]);
     const recipient = addrFromTopic(log.topics[2]);
@@ -96,7 +96,7 @@ function formatVaultEvent(name, argsObj, txHash, address, blockNumber, explorerB
 }
 
 /* ---------- dedupe / confirmations ---------- */
-function keyOf(log) { return `${log.transactionHash}:${log.logIndex}`; }
+const keyOf = (log) => `${log.transactionHash}:${log.logIndex}`;
 
 async function hasEnoughConf(http, log) {
   if (CONFIG.CONFIRMATIONS <= 0) return true;
@@ -105,11 +105,10 @@ async function hasEnoughConf(http, log) {
 }
 
 async function shouldProcess(http, log) {
-  const key = keyOf(log);
-  if (store.has(key)) return false;
+  // NOTE: allow multiple logs in the *same block* (no <=)
+  if (store.has(keyOf(log))) return false;
   const wm = store.getWatermark();
-  if (log.blockNumber <= wm) return false;
-  if (!(await hasEnoughConf(http, log))) return false;
+  if (log.blockNumber < wm) return false; // <-- changed from <= to <
   return true;
 }
 
@@ -160,11 +159,8 @@ async function handlePoolLog(http, log, poolName) {
     }
   }
 
-  // Not a supported Swap → ignore silently (but watermark for dedupe)
-  if (!argsObj) {
-    store.markIfNew(k, blockNumber);
-    return;
-  }
+  // Not a supported Swap → ignore (do NOT advance watermark)
+  if (!argsObj) return;
 
   try {
     const blk = await http.getBlock(blockNumber).catch(() => null);
@@ -172,6 +168,7 @@ async function handlePoolLog(http, log, poolName) {
     const msg = `${tsLine}${formatSwapEvent(poolName, argsObj, transactionHash, address, blockNumber, CONFIG.EXPLORER_BASE)}`;
     console.log('[Notify Swap]', msg.replace(/\n/g, ' | '));
     await notifyAll(msg);
+    // Only after successful notify, mark + advance watermark
     store.markIfNew(k, blockNumber);
   } catch (e) {
     console.error('[Notify error]', e?.message || e);
@@ -180,6 +177,7 @@ async function handlePoolLog(http, log, poolName) {
 
 async function handleVaultLog(http, log) {
   const k = keyOf(log);
+
   if (!(await hasEnoughConf(http, log))) {
     enqueuePending(log, 'vault', null);
     return;
@@ -198,8 +196,8 @@ async function handleVaultLog(http, log) {
     await notifyAll(msg);
     store.markIfNew(k, blockNumber);
   } catch {
-    // Unknown vault event → just watermark
-    store.markIfNew(k, blockNumber);
+    // Unknown vault event → ignore without advancing watermark
+    return;
   }
 }
 
@@ -253,7 +251,7 @@ export async function startWatcher() {
 
   ws.on('error', (e) => console.error('[WS error]', e?.message || e));
 
-  // Rechecker: drain pending when enough confirmations
+  // Drain pending once confirmations are met
   setInterval(async () => {
     if (pending.size === 0) return;
     const entries = Array.from(pending.values());
@@ -266,7 +264,7 @@ export async function startWatcher() {
     }
   }, 5000);
 
-  // Health ping (and also keeps WS active)
+  // Health ping
   setInterval(async () => {
     try { console.log('[WS] Health check - current block:', await ws.getBlockNumber()); }
     catch (e) { console.error('[WS] Health check failed:', e?.message || e); }
