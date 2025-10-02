@@ -65,7 +65,9 @@ async function shouldProcess(http, log) {
 }
 
 async function handleLog(http, log, contractType, poolName = null) {
-  if (!(await shouldProcess(http, log))) return;
+  const shouldProc = await shouldProcess(http, log);
+  console.log(`[handleLog] ${contractType} ${poolName || 'vault'} - shouldProcess: ${shouldProc}, block: ${log.blockNumber}`);
+  if (!shouldProc) return;
 
   const { transactionHash, blockNumber, topics, data, address } = log;
   const key = `${transactionHash}:${log.logIndex}`;
@@ -74,21 +76,26 @@ async function handleLog(http, log, contractType, poolName = null) {
   try {
     const iface = contractType === 'pool' ? poolIface : vaultIface;
     const parsed = iface.parseLog({ topics, data });
+    console.log(`[handleLog] Parsed event: ${parsed.name}`);
     const argsObj = {};
     parsed.fragment.inputs.forEach((inp, i) => {
       argsObj[inp.name || `arg${i}`] = parsed.args[i];
     });
     
     if (contractType === 'pool' && parsed.name === 'Swap') {
+      console.log(`[handleLog] Creating Swap notification for ${poolName}`);
       text = formatSwapEvent(poolName, argsObj, transactionHash, address, blockNumber, CONFIG.EXPLORER_BASE);
     } else if (contractType === 'vault') {
+      console.log(`[handleLog] Creating vault notification`);
       text = formatVaultEvent(parsed.name, argsObj, transactionHash, address, blockNumber, CONFIG.EXPLORER_BASE);
     } else {
+      console.log(`[handleLog] Ignoring non-Swap pool event: ${parsed.name}`);
       // Parsed successfully but not a Swap event on pool - ignore
       store.markIfNew(key, blockNumber);
       return;
     }
-  } catch {
+  } catch (e) {
+    console.log(`[handleLog] Failed to parse event:`, e?.message);
     // Failed to parse - ignore unknown events
     store.markIfNew(key, blockNumber);
     return;
