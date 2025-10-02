@@ -153,14 +153,12 @@ export async function startWatcher() {
 
   const ws = new ethers.WebSocketProvider(CONFIG.WS_URL);
   
-  // Diagnostic: log when WebSocket connects/disconnects
-  ws._websocket.on('open', () => console.log('[WS] Connected'));
-  ws._websocket.on('close', () => console.log('[WS] Disconnected'));
-  ws._websocket.on('error', (e) => console.error('[WS error]', e?.message || e));
+  // Basic error handler
+  ws.on('error', (e) => console.error('[WS error]', e?.message || e));
 
   // Subscribe to vault
   ws.on({ address: vaultAddress }, async (log) => {
-    console.log('[WS] Received vault event!', log.transactionHash); // diagnostic
+    console.log('[WS] ✓ Vault event:', log.transactionHash);
     try { await handleLog(http, log, 'vault'); }
     catch (e) { console.error('[Handle vault log error]', e?.message || e); }
   });
@@ -168,7 +166,7 @@ export async function startWatcher() {
   // Subscribe to pools
   CONFIG.POOLS.forEach((pool, idx) => {
     ws.on({ address: poolAddresses[idx] }, async (log) => {
-      console.log(`[WS] Received ${pool.name} event!`, log.transactionHash); // diagnostic
+      console.log(`[WS] ✓ ${pool.name} event:`, log.transactionHash);
       try { await handleLog(http, log, 'pool', pool.name); }
       catch (e) { console.error(`[Handle ${pool.name} log error]`, e?.message || e); }
     });
