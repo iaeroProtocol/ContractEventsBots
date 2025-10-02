@@ -152,34 +152,14 @@ export async function startWatcher() {
 
   const ws = new ethers.WebSocketProvider(CONFIG.WS_URL);
   
-  // ADD THESE LINES
-  ws._websocket.on('open', () => console.log('[WS] ✅ Connection opened'));
-  ws._websocket.on('close', (code, reason) => console.log('[WS] ❌ Connection closed:', code, reason));
-  ws._websocket.on('ping', () => console.log('[WS] 🏓 Ping received'));
-  ws._websocket.on('pong', () => console.log('[WS] 🏓 Pong sent'));
+  // Wait for connection to establish
+  await ws.ready;
+  console.log('[WS] ✅ Connection established');
   
+  // Basic error handler
   ws.on('error', (e) => console.error('[WS error]', e?.message || e));
-
-  // Subscribe to vault
-  ws.on({ address: vaultAddress }, async (log) => {
-    console.log('[WS] ✓ Vault event:', log.transactionHash, 'Block:', log.blockNumber); // ENHANCED
-    try { await handleLog(http, log, 'vault'); }
-    catch (e) { console.error('[Handle vault log error]', e?.message || e); }
-  });
-
-  // Subscribe to pools
-  CONFIG.POOLS.forEach((pool, idx) => {
-    ws.on({ address: poolAddresses[idx] }, async (log) => {
-      console.log(`[WS] ✓ ${pool.name} event:`, log.transactionHash, 'Block:', log.blockNumber); // ENHANCED
-      try { await handleLog(http, log, 'pool', pool.name); }
-      catch (e) { console.error(`[Handle ${pool.name} log error]`, e?.message || e); }
-    });
-    console.log(`[Live] Subscribed to ${pool.name} at ${poolAddresses[idx]}`);
-  });
-
-  console.log('[Live] Subscribed to vault at', vaultAddress);
   
-  // ADD PERIODIC HEALTH CHECK
+  // Health check every minute
   setInterval(async () => {
     try {
       const block = await ws.getBlockNumber();
@@ -187,5 +167,24 @@ export async function startWatcher() {
     } catch (e) {
       console.error('[WS] Health check failed:', e?.message || e);
     }
-  }, 60000); // Every minute
+  }, 60000);
+
+  // Subscribe to vault
+  ws.on({ address: vaultAddress }, async (log) => {
+    console.log('[WS] ✓ Vault event:', log.transactionHash, 'Block:', log.blockNumber);
+    try { await handleLog(http, log, 'vault'); }
+    catch (e) { console.error('[Handle vault log error]', e?.message || e); }
+  });
+
+  // Subscribe to pools
+  CONFIG.POOLS.forEach((pool, idx) => {
+    ws.on({ address: poolAddresses[idx] }, async (log) => {
+      console.log(`[WS] ✓ ${pool.name} event:`, log.transactionHash, 'Block:', log.blockNumber);
+      try { await handleLog(http, log, 'pool', pool.name); }
+      catch (e) { console.error(`[Handle ${pool.name} log error]`, e?.message || e); }
+    });
+    console.log(`[Live] Subscribed to ${pool.name} at ${poolAddresses[idx]}`);
+  });
+
+  console.log('[Live] Subscribed to vault at', vaultAddress);
 }
