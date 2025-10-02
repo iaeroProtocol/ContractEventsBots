@@ -11,6 +11,29 @@ import { store } from './store.mjs';
 const vaultIface = new ethers.Interface(vaultAbi);
 const poolIface  = new ethers.Interface(poolAbi);
 
+// ---- manual Swap (UniswapV2/Solidly-style) fallback ----
+// event Swap(address indexed sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address indexed to)
+const SWAP_V2_TOPIC = ethers.id('Swap(address,uint256,uint256,uint256,uint256,address)');
+const coder = ethers.AbiCoder.defaultAbiCoder();
+function tryParseV2Swap(log) {
+  try {
+    if (!log?.topics?.length) return null;
+    if (log.topics[0] !== SWAP_V2_TOPIC) return null;
+    // topics[1] = sender, topics[2] = to (both indexed)
+    const sender = ethers.getAddress(ethers.dataSlice(log.topics[1], 12)); // last 20 bytes
+    const to     = ethers.getAddress(ethers.dataSlice(log.topics[2], 12));
+    // data encodes 4 uint256
+    const [amount0In, amount1In, amount0Out, amount1Out] =
+      coder.decode(['uint256','uint256','uint256','uint256'], log.data);
+    return {
+      name: 'Swap',
+      argsObj: { sender, to, amount0In, amount1In, amount0Out, amount1Out }
+    };
+  } catch {
+    return null;
+  }
+}
+
 /* ---------- notifier pacing ---------- */
 let lastSentAt = 0;
 async function notifyAll(text) {
@@ -27,7 +50,6 @@ async function notifyAll(text) {
 function formatSwapEvent(poolName, argsObj, txHash, address, blockNumber, explorerBase) {
   const { sender, to, amount0In, amount1In, amount0Out, amount1Out } = argsObj;
 
-  // Determine trade direction
   let tradeDesc = '';
   if (amount0In > 0n && amount1Out > 0n) {
     tradeDesc = `Bought token1: ${fmtWei(amount1Out)} (sold ${fmtWei(amount0In)} token0)`;
@@ -79,29 +101,53 @@ async function handleLog(http, log, contractType, poolName = null) {
 
   let text;
   try {
-    const iface = contractType === 'pool' ? poolIface : vaultIface;
-    const parsed = iface.parseLog({ topics, data });
-    if (!parsed || !parsed.name) {
-      console.log(`[Parse] unknown event at ${address} tx=${transactionHash}`);
+    let parsed, argsObj;
+
+    if (contractType === 'pool') {
+      // First try the provided ABI
+      try {
+        parsed = poolIface.parseLog({ topics, data });
+      } catch {
+        parsed = null;
+      }
+
+      // Fallback to UniswapV2/Solidly-style Swap if ABI didn't match
+      if (!parsed) {
+        const v2 = tryParseV2Swap(log);
+        if (v2) {
+          parsed = { name: v2.name };
+          argsObj = v2.argsObj;
+        }
+      }
+    } else {
+      parsed = vaultIface.parseLog({ topics, data });
     }
 
-    const argsObj = {};
-    parsed.fragment.inputs.forEach((inp, i) => {
-      argsObj[inp.name || `arg${i}`] = parsed.args[i];
-    });
+    if (!parsed) {
+      console.log(`[Parse] unknown event at ${address} tx=${transactionHash}`);
+      store.markIfNew(key, blockNumber);
+      return;
+    }
+
+    if (!argsObj) {
+      // Build argsObj from parsed fragment if we used the ABI path
+      argsObj = {};
+      parsed.fragment.inputs.forEach((inp, i) => {
+        argsObj[inp.name || `arg${i}`] = parsed.args[i];
+      });
+    }
 
     if (contractType === 'pool' && parsed.name === 'Swap') {
       text = formatSwapEvent(poolName, argsObj, transactionHash, address, blockNumber, CONFIG.EXPLORER_BASE);
     } else if (contractType === 'vault') {
       text = formatVaultEvent(parsed.name, argsObj, transactionHash, address, blockNumber, CONFIG.EXPLORER_BASE);
     } else {
-      // Parsed successfully but not a Swap event on pool - ignore
+      // Not a Swap (pool) or a vault event => ignore but watermark
       store.markIfNew(key, blockNumber);
       return;
     }
   } catch (e) {
     console.log(`[ParseError] ${contractType} ${poolName ?? ''} tx=${transactionHash} ${e?.message || e}`);
-    // Failed to parse - ignore unknown events
     store.markIfNew(key, blockNumber);
     return;
   }
@@ -110,7 +156,7 @@ async function handleLog(http, log, contractType, poolName = null) {
     const blk = await http.getBlock(blockNumber).catch(() => null);
     const tsLine = blk ? `🕐 ${new Date(blk.timestamp * 1000).toISOString()}\n` : '';
     const msg = `${tsLine}${text}`;
-    console.log('[Notify] ', msg.replace(/\n/g, ' | ')); // console echo for sanity
+    console.log('[Notify] ', msg.replace(/\n/g, ' | '));
     await notifyAll(msg);
     store.markIfNew(key, blockNumber);
   } catch (e) {
@@ -187,7 +233,6 @@ export async function startWatcher() {
   ws.on({ address: vaultAddress }, async (log) => {
     console.log('[WS] ✓ Vault event:', log.transactionHash, 'Block:', log.blockNumber);
     try {
-      // Wait for confirmations on live logs to avoid skipping in shouldProcess
       if (CONFIG.CONFIRMATIONS > 0) {
         try { await http.waitForTransaction(log.transactionHash, CONFIG.CONFIRMATIONS); }
         catch (e) { console.log('[ConfirmWait vault] error or timeout:', e?.message || e); }
@@ -203,7 +248,6 @@ export async function startWatcher() {
     ws.on({ address: poolAddresses[idx] }, async (log) => {
       console.log(`[WS] ✓ ${pool.name} event:`, log.transactionHash, 'Block:', log.blockNumber);
       try {
-        // Wait for confirmations on live logs to avoid skipping in shouldProcess
         if (CONFIG.CONFIRMATIONS > 0) {
           try { await http.waitForTransaction(log.transactionHash, CONFIG.CONFIRMATIONS); }
           catch (e) { console.log(`[ConfirmWait ${pool.name}] error or timeout:`, e?.message || e); }
