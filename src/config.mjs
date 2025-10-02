@@ -36,6 +36,11 @@ export const CONFIG = {
   DISCORD: {
     WEBHOOK_URL: process.env.DISCORD_WEBHOOK_URL || '',
   },
+  
+  POOLS: [
+    { address: '0x08d49DA370ecfFBC4c6Fdd2aE82B2D6aE238Affd', name: 'iAERO/AERO' },
+    { address: '0x8966379fCD16F7cB6c6EA61077B6c4fAfECa28f4', name: 'LIQ/USDC' }
+  ],
 
   // Dedupe storage
   // Use a Railway volume mount at /data if available; else local file

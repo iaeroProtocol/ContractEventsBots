@@ -1,13 +1,15 @@
 // src/watcher.mjs
 import { ethers } from 'ethers';
 import { CONFIG } from './config.mjs';
-import abi from './abi/PermalockVault.json' with { type: 'json' };
-import { linkTx, linkAddr, prettyArgs, sleep } from './utils.mjs';
+import vaultAbi from './abi/PermalockVault.json' with { type: 'json' };
+import poolAbi from './abi/AerodromePool.json' with { type: 'json' };
+import { linkTx, linkAddr, prettyArgs, sleep, fmtWei } from './utils.mjs';
 import { sendTelegram } from './notify/telegram.mjs';
 import { sendDiscord } from './notify/discord.mjs';
 import { store } from './store.mjs';
 
-const iface = new ethers.Interface(abi);
+const vaultIface = new ethers.Interface(vaultAbi);
+const poolIface = new ethers.Interface(poolAbi);
 
 /* ---------- notifier pacing ---------- */
 let lastSentAt = 0;
@@ -22,50 +24,54 @@ async function notifyAll(text) {
 }
 
 /* ---------- formatting ---------- */
-function formatDecodedEvent(name, argsObj, txHash, address, blockNumber, explorerBase) {
-  const header = `**${name}** on *PermalockVault*\n`;
-  const body   = prettyArgs(argsObj);
-  const footer =
-    `\n🔗 Tx: ${linkTx(explorerBase, txHash)}\n` +
-    `🏷️ Contract: ${linkAddr(explorerBase, address)}\n` +
-    `🧱 Block: ${blockNumber}`;
+function formatSwapEvent(poolName, argsObj, txHash, address, blockNumber, explorerBase) {
+  const { sender, to, amount0In, amount1In, amount0Out, amount1Out } = argsObj;
+  
+  // Determine trade direction
+  let tradeDesc = '';
+  if (amount0In > 0n && amount1Out > 0n) {
+    tradeDesc = `Bought token1: ${fmtWei(amount1Out)} (sold ${fmtWei(amount0In)} token0)`;
+  } else if (amount1In > 0n && amount0Out > 0n) {
+    tradeDesc = `Bought token0: ${fmtWei(amount0Out)} (sold ${fmtWei(amount1In)} token1)`;
+  }
+  
+  const header = `**Swap on ${poolName}**\n`;
+  const body = `• ${tradeDesc}\n• Sender: ${sender}\n• To: ${to}`;
+  const footer = `\n🔗 Tx: ${linkTx(explorerBase, txHash)}\n🏷️ Pool: ${linkAddr(explorerBase, address)}\n🧱 Block: ${blockNumber}`;
   return `${header}\n${body}\n${footer}`;
 }
+
+function formatVaultEvent(name, argsObj, txHash, address, blockNumber, explorerBase) {
+  const header = `**${name}** on *PermalockVault*\n`;
+  const body = prettyArgs(argsObj);
+  const footer = `\n🔗 Tx: ${linkTx(explorerBase, txHash)}\n🏷️ Contract: ${linkAddr(explorerBase, address)}\n🧱 Block: ${blockNumber}`;
+  return `${header}\n${body}\n${footer}`;
+}
+
 function formatUnknownEvent(topic0, data, txHash, address, blockNumber, explorerBase) {
   const header = `**Unknown event** (topic0: \`${topic0}\`)`;
-  const body   = `data: \`${(data||'0x').slice(0, 200)}${(data||'').length>200?'…':''}\``;
-  const footer =
-    `\n🔗 Tx: ${linkTx(explorerBase, txHash)}\n` +
-    `🏷️ Contract: ${linkAddr(explorerBase, address)}\n` +
-    `🧱 Block: ${blockNumber}`;
+  const body = `data: \`${(data||'0x').slice(0, 200)}${(data||'').length>200?'…':''}\``;
+  const footer = `\n🔗 Tx: ${linkTx(explorerBase, txHash)}\n🏷️ Contract: ${linkAddr(explorerBase, address)}\n🧱 Block: ${blockNumber}`;
   return `${header}\n\n${body}\n${footer}`;
 }
 
 /* ---------- dedupe / confirmations ---------- */
-/** true if this log should be posted (not duplicate, confirmed enough) */
 async function shouldProcess(http, log) {
   const key = `${log.transactionHash}:${log.logIndex}`;
-
-  // already seen?
   if (store.has(key)) return false;
 
-  // confirmations (optional)
   if (CONFIG.CONFIRMATIONS > 0) {
     const latest = await http.getBlockNumber();
-    if (log.blockNumber > latest - CONFIG.CONFIRMATIONS) {
-      // not enough confirmations yet; skip for now
-      return false;
-    }
+    if (log.blockNumber > latest - CONFIG.CONFIRMATIONS) return false;
   }
 
-  // watermark: ignore anything at or below lastProcessedBlock
   const wm = store.getWatermark();
   if (log.blockNumber <= wm) return false;
 
   return true;
 }
 
-async function handleLog(http, log) {
+async function handleLog(http, log, contractType, poolName = null) {
   if (!(await shouldProcess(http, log))) return;
 
   const { transactionHash, blockNumber, topics, data, address } = log;
@@ -73,53 +79,54 @@ async function handleLog(http, log) {
 
   let text;
   try {
+    const iface = contractType === 'pool' ? poolIface : vaultIface;
     const parsed = iface.parseLog({ topics, data });
     const argsObj = {};
     parsed.fragment.inputs.forEach((inp, i) => {
       argsObj[inp.name || `arg${i}`] = parsed.args[i];
     });
-    text = formatDecodedEvent(parsed.name, argsObj, transactionHash, address, blockNumber, CONFIG.EXPLORER_BASE);
+    
+    if (contractType === 'pool' && parsed.name === 'Swap') {
+      text = formatSwapEvent(poolName, argsObj, transactionHash, address, blockNumber, CONFIG.EXPLORER_BASE);
+    } else {
+      text = formatVaultEvent(parsed.name, argsObj, transactionHash, address, blockNumber, CONFIG.EXPLORER_BASE);
+    }
   } catch {
     text = formatUnknownEvent(topics?.[0] || '0x', data || '0x', transactionHash, address, blockNumber, CONFIG.EXPLORER_BASE);
   }
 
   try {
-    // timestamp (optional)
     const blk = await http.getBlock(blockNumber).catch(() => null);
-    const tsLine = blk ? `🕒 ${new Date(blk.timestamp * 1000).toISOString()}\n` : '';
+    const tsLine = blk ? `🕐 ${new Date(blk.timestamp * 1000).toISOString()}\n` : '';
     await notifyAll(`${tsLine}${text}`);
-
-    // mark as seen AFTER successful notify
     store.markIfNew(key, blockNumber);
   } catch (e) {
     console.error('[Notify error]', e?.message || e);
-    // do not mark; will retry on next run
   }
 }
 
 /* ---------- backfill ---------- */
-async function backfill(http, address) {
-  // Latest minus confirmations (if any) as an upper bound
+async function backfill(http, addresses, contractTypes, poolNames) {
   let latest = await http.getBlockNumber();
   if (CONFIG.CONFIRMATIONS > 0) latest -= CONFIG.CONFIRMATIONS;
 
   const fromWatermark = store.getWatermark() + 1;
-  const fromBackfill  = CONFIG.BACKFILL_BLOCKS > 0 ? Math.max(0, latest - CONFIG.BACKFILL_BLOCKS) : latest;
-  const start         = Math.max(fromWatermark, fromBackfill);
+  const fromBackfill = CONFIG.BACKFILL_BLOCKS > 0 ? Math.max(0, latest - CONFIG.BACKFILL_BLOCKS) : latest;
+  const start = Math.max(fromWatermark, fromBackfill);
 
   if (start >= latest) return;
 
   console.log(`[Backfill] from ${start} to ${latest}…`);
-  const logs = await http.getLogs({ address, fromBlock: start, toBlock: latest });
-
-  for (const log of logs) {
-    await handleLog(http, log);
-    // gentle pacing; the Discord queue also respects rate limits
-    await sleep(100);
+  
+  for (let i = 0; i < addresses.length; i++) {
+    const logs = await http.getLogs({ address: addresses[i], fromBlock: start, toBlock: latest });
+    for (const log of logs) {
+      await handleLog(http, log, contractTypes[i], poolNames[i]);
+      await sleep(100);
+    }
+    console.log(`[Backfill] ${addresses[i]} done (${logs.length} logs)`);
   }
-  console.log(`[Backfill] done (${logs.length} logs)`);
 
-  // advance watermark to latest bound
   store.setWatermark(latest);
 }
 
@@ -127,10 +134,14 @@ async function backfill(http, address) {
 export async function startWatcher() {
   store.init();
 
-  const address = ethers.getAddress(CONFIG.VAULT);
-  const http    = new ethers.JsonRpcProvider(CONFIG.HTTP_URL);
+  const vaultAddress = ethers.getAddress(CONFIG.VAULT);
+  const poolAddresses = CONFIG.POOLS.map(p => ethers.getAddress(p.address));
+  const allAddresses = [vaultAddress, ...poolAddresses];
+  const contractTypes = ['vault', ...CONFIG.POOLS.map(() => 'pool')];
+  const poolNames = [null, ...CONFIG.POOLS.map(p => p.name)];
 
-  // Optional: seed watermark to "now" on first boot to avoid posting history
+  const http = new ethers.JsonRpcProvider(CONFIG.HTTP_URL);
+
   if (store.getWatermark() === 0 && process.env.SEED_WATERMARK_ON_FIRST_RUN === 'true') {
     const latest = await http.getBlockNumber();
     const seeded = CONFIG.CONFIRMATIONS > 0 ? (latest - CONFIG.CONFIRMATIONS) : latest;
@@ -138,19 +149,25 @@ export async function startWatcher() {
     console.log(`[Seed] Watermark set to ${seeded}; skipping history this run`);
   }
 
-  await backfill(http, address);
+  await backfill(http, allAddresses, contractTypes, poolNames);
 
   const ws = new ethers.WebSocketProvider(CONFIG.WS_URL);
-  // (optional) this may not be a recognized provider event on all providers;
-  // if you see another "unknown ProviderEvent 'error'" remove this line too.
   ws.on('error', (e) => console.error('[WS error]', e?.message || e));
 
-  const filter = { address }; // you can add topics here if you want to narrow
-  ws.on(filter, async (log) => {
-    try { await handleLog(http, log); }
-    catch (e) { console.error('[Handle log error]', e?.message || e); }
+  // Subscribe to vault
+  ws.on({ address: vaultAddress }, async (log) => {
+    try { await handleLog(http, log, 'vault'); }
+    catch (e) { console.error('[Handle vault log error]', e?.message || e); }
   });
 
+  // Subscribe to each pool
+  CONFIG.POOLS.forEach((pool, idx) => {
+    ws.on({ address: poolAddresses[idx] }, async (log) => {
+      try { await handleLog(http, log, 'pool', pool.name); }
+      catch (e) { console.error(`[Handle ${pool.name} log error]`, e?.message || e); }
+    });
+    console.log(`[Live] Subscribed to ${pool.name} at ${poolAddresses[idx]}`);
+  });
 
-  console.log('[Live] Subscribed for logs on', address);
+  console.log('[Live] Subscribed to vault at', vaultAddress);
 }
