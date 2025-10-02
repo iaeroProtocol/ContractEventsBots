@@ -48,13 +48,6 @@ function formatVaultEvent(name, argsObj, txHash, address, blockNumber, explorerB
   return `${header}\n${body}\n${footer}`;
 }
 
-function formatUnknownEvent(topic0, data, txHash, address, blockNumber, explorerBase) {
-  const header = `**Unknown event** (topic0: \`${topic0}\`)`;
-  const body = `data: \`${(data||'0x').slice(0, 200)}${(data||'').length>200?'…':''}\``;
-  const footer = `\n🔗 Tx: ${linkTx(explorerBase, txHash)}\n🏷️ Contract: ${linkAddr(explorerBase, address)}\n🧱 Block: ${blockNumber}`;
-  return `${header}\n\n${body}\n${footer}`;
-}
-
 /* ---------- dedupe / confirmations ---------- */
 async function shouldProcess(http, log) {
   const key = `${log.transactionHash}:${log.logIndex}`;
@@ -88,11 +81,17 @@ async function handleLog(http, log, contractType, poolName = null) {
     
     if (contractType === 'pool' && parsed.name === 'Swap') {
       text = formatSwapEvent(poolName, argsObj, transactionHash, address, blockNumber, CONFIG.EXPLORER_BASE);
-    } else {
+    } else if (contractType === 'vault') {
       text = formatVaultEvent(parsed.name, argsObj, transactionHash, address, blockNumber, CONFIG.EXPLORER_BASE);
+    } else {
+      // Parsed successfully but not a Swap event on pool - ignore
+      store.markIfNew(key, blockNumber);
+      return;
     }
   } catch {
-    text = formatUnknownEvent(topics?.[0] || '0x', data || '0x', transactionHash, address, blockNumber, CONFIG.EXPLORER_BASE);
+    // Failed to parse - ignore unknown events
+    store.markIfNew(key, blockNumber);
+    return;
   }
 
   try {
