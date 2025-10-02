@@ -152,12 +152,17 @@ export async function startWatcher() {
 
   const ws = new ethers.WebSocketProvider(CONFIG.WS_URL);
   
-  // Basic error handler
+  // ADD THESE LINES
+  ws._websocket.on('open', () => console.log('[WS] ✅ Connection opened'));
+  ws._websocket.on('close', (code, reason) => console.log('[WS] ❌ Connection closed:', code, reason));
+  ws._websocket.on('ping', () => console.log('[WS] 🏓 Ping received'));
+  ws._websocket.on('pong', () => console.log('[WS] 🏓 Pong sent'));
+  
   ws.on('error', (e) => console.error('[WS error]', e?.message || e));
 
   // Subscribe to vault
   ws.on({ address: vaultAddress }, async (log) => {
-    console.log('[WS] ✓ Vault event:', log.transactionHash);
+    console.log('[WS] ✓ Vault event:', log.transactionHash, 'Block:', log.blockNumber); // ENHANCED
     try { await handleLog(http, log, 'vault'); }
     catch (e) { console.error('[Handle vault log error]', e?.message || e); }
   });
@@ -165,7 +170,7 @@ export async function startWatcher() {
   // Subscribe to pools
   CONFIG.POOLS.forEach((pool, idx) => {
     ws.on({ address: poolAddresses[idx] }, async (log) => {
-      console.log(`[WS] ✓ ${pool.name} event:`, log.transactionHash);
+      console.log(`[WS] ✓ ${pool.name} event:`, log.transactionHash, 'Block:', log.blockNumber); // ENHANCED
       try { await handleLog(http, log, 'pool', pool.name); }
       catch (e) { console.error(`[Handle ${pool.name} log error]`, e?.message || e); }
     });
@@ -173,4 +178,14 @@ export async function startWatcher() {
   });
 
   console.log('[Live] Subscribed to vault at', vaultAddress);
+  
+  // ADD PERIODIC HEALTH CHECK
+  setInterval(async () => {
+    try {
+      const block = await ws.getBlockNumber();
+      console.log('[WS] Health check - current block:', block);
+    } catch (e) {
+      console.error('[WS] Health check failed:', e?.message || e);
+    }
+  }, 60000); // Every minute
 }
