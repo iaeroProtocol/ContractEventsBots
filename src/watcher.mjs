@@ -8,6 +8,7 @@ import { sendTelegram } from './notify/telegram.mjs';
 import { sendDiscord } from './notify/discord.mjs';
 import { store } from './store.mjs';
 
+/* ---------- ABIs / interfaces ---------- */
 const vaultIface = new ethers.Interface(vaultAbi);
 const poolIface  = new ethers.Interface(poolAbi);
 
@@ -98,9 +99,34 @@ function formatVaultEvent(name, argsObj, txHash, address, blockNumber, explorerB
 /* ---------- dedupe / confirmations ---------- */
 const keyOf = (log) => `${log.transactionHash}:${log.logIndex}`;
 
+// Shared WS state (used for resilient confirmations + watchdog)
+let ws;                         // ethers.WebSocketProvider
+let latestWsBlock = 0;          // last ws block number seen
+let lastWsBlockAt = Date.now(); // timestamp of last block tick
+let lastAnyLogAt  = Date.now(); // timestamp of last contract log
+
+const WS_IDLE_MS         = CONFIG.WS_IDLE_MS ?? 10 * 60_000; // 10 minutes
+const SWEEP_INTERVAL_MS  = CONFIG.SWEEP_INTERVAL_MS ?? 15_000; // 15s (set to 0 to disable)
+const WS_BLOCK_STALL_MS  = CONFIG.WS_BLOCK_STALL_MS ?? 180_000; // 3 minutes
+
+async function latestBlockSafe(http) {
+  // Take the freshest of HTTP and WS; tolerate either side failing
+  const results = await Promise.allSettled([
+    http.getBlockNumber(),
+    ws?.getBlockNumber?.()
+  ]);
+  let best = 0;
+  for (const r of results) {
+    if (r.status === 'fulfilled' && Number.isFinite(Number(r.value))) {
+      best = Math.max(best, Number(r.value));
+    }
+  }
+  return best;
+}
+
 async function hasEnoughConf(http, log) {
   if (CONFIG.CONFIRMATIONS <= 0) return true;
-  const latest = await http.getBlockNumber();
+  const latest = await latestBlockSafe(http);
   return log.blockNumber <= (latest - CONFIG.CONFIRMATIONS);
 }
 
@@ -201,7 +227,7 @@ async function handleVaultLog(http, log) {
   }
 }
 
-/* ---------- backfill ---------- */
+/* ---------- backfill (startup only) ---------- */
 async function backfill(http, addresses, contractTypes, poolNames) {
   let latest = await http.getBlockNumber();
   if (CONFIG.CONFIRMATIONS > 0) latest -= CONFIG.CONFIRMATIONS;
@@ -221,7 +247,24 @@ async function backfill(http, addresses, contractTypes, poolNames) {
     }
     console.log(`[Backfill] ${addresses[i]} done (${logs.length} logs)`);
   }
+  // Safe because we restricted to (latest - confirmations)
   store.setWatermark(latest);
+}
+
+/* ---------- sweep backstop (periodic) ---------- */
+async function sweepRange(http, fromBlock, toBlock, addresses, contractTypes, poolNames) {
+  let total = 0;
+  for (let i = 0; i < addresses.length; i++) {
+    const logs = await http.getLogs({ address: addresses[i], fromBlock, toBlock });
+    total += logs.length;
+    for (const log of logs) {
+      if (contractTypes[i] === 'pool') await handlePoolLog(http, log, poolNames[i]);
+      else await handleVaultLog(http, log);
+      await sleep(20);
+    }
+  }
+  // If truly no logs, it's safe to advance watermark to reduce rescans
+  if (total === 0) store.setWatermark(toBlock);
 }
 
 /* ---------- start watcher ---------- */
@@ -243,13 +286,58 @@ export async function startWatcher() {
     console.log(`[Seed] Watermark set to ${seeded}`);
   }
 
+  // Startup backfill (bounded by BACKFILL_BLOCKS and confirmations)
   await backfill(http, allAddresses, contractTypes, poolNames);
 
-  const ws = new ethers.WebSocketProvider(CONFIG.WS_URL);
-  await ws.ready;
-  console.log('[WS] ✅ Connection established');
+  /* --- (Re)connectable WS + combined subscription --- */
+  async function connectAndSubscribe() {
+    if (ws) {
+      try { await ws.destroy(); } catch {}
+    }
 
-  ws.on('error', (e) => console.error('[WS error]', e?.message || e));
+    ws = new ethers.WebSocketProvider(CONFIG.WS_URL);
+    await ws.ready;
+    console.log('[WS] ✅ Connection established');
+
+    ws.on('error', (e) => {
+      console.error('[WS error]', e?.message || e);
+      // Watchdog below will recreate if needed
+    });
+
+    ws.on('block', (bn) => {
+      latestWsBlock = Number(bn);
+      lastWsBlockAt = Date.now();
+    });
+
+    // Build a single combined subscription across vault + pools
+    const addrKind = new Map();
+    addrKind.set(vaultAddress, { type: 'vault', name: null });
+    for (let i = 0; i < poolAddresses.length; i++) {
+      addrKind.set(poolAddresses[i], { type: 'pool', name: poolNames[i] });
+    }
+
+    const allAddrs = Array.from(addrKind.keys());
+    ws.on({ address: allAddrs }, async (log) => {
+      lastAnyLogAt = Date.now();
+      const addr = ethers.getAddress(log.address);
+      const kind = addrKind.get(addr);
+      if (!kind) return;
+
+      console.log(`[WS] ✓ ${kind.type === 'vault' ? 'Vault' : kind.name} event:`,
+        log.transactionHash, 'Block:', log.blockNumber, '| topic0=', log.topics?.[0]);
+
+      try {
+        if (kind.type === 'vault') await handleVaultLog(http, log);
+        else await handlePoolLog(http, log, kind.name);
+      } catch (e) {
+        console.error(`[Handle ${kind.type === 'vault' ? 'vault' : kind.name} log error]`, e?.message || e);
+      }
+    });
+
+    console.log('[Live] Subscribed to vault and', poolAddresses.length, 'pool(s) via one combined filter');
+  }
+
+  await connectAndSubscribe();
 
   // Drain pending once confirmations are met
   setInterval(async () => {
@@ -264,28 +352,50 @@ export async function startWatcher() {
     }
   }, 5000);
 
-  // Health ping
+  // Health + visibility (both heights, pending size, idle age)
   setInterval(async () => {
-    try { console.log('[WS] Health check - current block:', await ws.getBlockNumber()); }
-    catch (e) { console.error('[WS] Health check failed:', e?.message || e); }
-  }, 60000);
+    try {
+      const [wsBN, httpBN] = await Promise.all([
+        ws.getBlockNumber().catch(() => null),
+        http.getBlockNumber().catch(() => null)
+      ]);
+      const lastLogAgoSec = ((Date.now() - lastAnyLogAt) / 1000) | 0;
+      console.log(`[Health] ws=${wsBN} http=${httpBN} pending=${pending.size} lastLogAgo=${lastLogAgoSec}s`);
+    } catch (e) {
+      console.error('[Health] combined check failed:', e?.message || e);
+    }
+  }, 120_000);
 
-  // Vault
-  ws.on({ address: vaultAddress }, async (log) => {
-    console.log('[WS] ✓ Vault event:', log.transactionHash, 'Block:', log.blockNumber);
-    try { await handleVaultLog(http, log); }
-    catch (e) { console.error('[Handle vault log error]', e?.message || e); }
-  });
+  // Watchdog: if blocks are ticking but *no logs* for a long time, recreate WS
+  setInterval(async () => {
+    const idleLogsMs   = Date.now() - lastAnyLogAt;
+    const sinceBlockMs = Date.now() - lastWsBlockAt;
+    const chainMoving  = sinceBlockMs < WS_BLOCK_STALL_MS;
 
-  // Pools
-  CONFIG.POOLS.forEach((pool, idx) => {
-    ws.on({ address: poolAddresses[idx] }, async (log) => {
-      console.log(`[WS] ✓ ${pool.name} event:`, log.transactionHash, 'Block:', log.blockNumber, '| topic0=', log.topics?.[0]);
-      try { await handlePoolLog(http, log, pool.name); }
-      catch (e) { console.error(`[Handle ${pool.name} log error]`, e?.message || e); }
-    });
-    console.log(`[Live] Subscribed to ${pool.name} at ${poolAddresses[idx]}`);
-  });
+    if (idleLogsMs > WS_IDLE_MS && chainMoving) {
+      console.warn(`[WS] No contract logs for ${(idleLogsMs/1000|0)}s while blocks are at ~${latestWsBlock}. Recreating WS + resubscribing…`);
+      try { await connectAndSubscribe(); }
+      catch (e) { console.error('[WS] Reconnect failed:', e?.message || e); }
+    }
+  }, 60_000);
 
-  console.log('[Live] Subscribed to vault at', vaultAddress);
+  // Optional sweep backstop to catch anything missed during WS hiccups
+  if (SWEEP_INTERVAL_MS !== 0) {
+    (async function sweepLoop() {
+      while (true) {
+        try {
+          let latest = await latestBlockSafe(http);
+          if (CONFIG.CONFIRMATIONS > 0) latest -= CONFIG.CONFIRMATIONS;
+
+          const from = store.getWatermark() + 1;
+          if (from <= latest) {
+            await sweepRange(http, from, latest, allAddresses, contractTypes, poolNames);
+          }
+        } catch (e) {
+          console.error('[Sweep] error:', e?.message || e);
+        }
+        await sleep(SWEEP_INTERVAL_MS);
+      }
+    })();
+  }
 }
