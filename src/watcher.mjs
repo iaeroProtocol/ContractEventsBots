@@ -104,6 +104,9 @@ let ws;                         // ethers.WebSocketProvider
 let latestWsBlock = 0;          // last ws block number seen
 let lastWsBlockAt = Date.now(); // timestamp of last block tick
 let lastAnyLogAt  = Date.now(); // timestamp of last contract log
+let reconnecting  = false;      // re-entrancy guard
+let reconnectTimer = null;      // debounce immediate reconnect
+let reconnectBackoffMs = 1000;  // 1s → capped backoff
 
 const WS_IDLE_MS         = CONFIG.WS_IDLE_MS ?? 10 * 60_000; // 10 minutes
 const SWEEP_INTERVAL_MS  = CONFIG.SWEEP_INTERVAL_MS ?? 15_000; // 15s (set to 0 to disable)
@@ -291,18 +294,49 @@ export async function startWatcher() {
 
   /* --- (Re)connectable WS + combined subscription --- */
   async function connectAndSubscribe() {
-    if (ws) {
-      try { await ws.destroy(); } catch {}
-    }
-
-    ws = new ethers.WebSocketProvider(CONFIG.WS_URL);
-    await ws.ready;
-    console.log('[WS] ✅ Connection established');
+    if (reconnecting) {
+            return; // another caller is already reconnecting
+          }
+          reconnecting = true;
+          try {
+                  if (ws) {
+                    try {
+                      ws.removeAllListeners?.();
+                      ws.destroy?.();
+                    } catch {}
+                    ws = undefined;
+                    // tiny backoff to let sockets close
+                    await sleep(300);
+                  }
+            
+                  ws = new ethers.WebSocketProvider(CONFIG.WS_URL);
+                  await ws.ready;
+                  console.log('[WS] ✅ Connection established');
+                  reconnectBackoffMs = 1000; // reset backoff on success
+                } finally {
+                  reconnecting = false; // never get stuck true
+                }
 
     ws.on('error', (e) => {
       console.error('[WS error]', e?.message || e);
       // Watchdog below will recreate if needed
     });
+
+    ws.on('close', (code) => {
+            console.warn(`[WS] ❌ Connection closed (code=${code}). Reconnecting…`);
+            lastWsBlockAt = 0; // mark stalled
+            // kick an immediate reconnect (debounced; don’t wait for watchdog)
+            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+            const delay = reconnectBackoffMs;
+            reconnectTimer = setTimeout(() => {
+              reconnectTimer = null;
+              connectAndSubscribe().catch(e => {
+                console.error('[WS] immediate reconnect failed:', e?.message || e);
+                reconnectBackoffMs = Math.min(reconnectBackoffMs * 2, 30_000); // cap at 30s
+              });
+              // bump backoff on failure; reset on success in connectAndSubscribe()
+            }, delay);
+          });
 
     ws.on('block', (bn) => {
       latestWsBlock = Number(bn);
@@ -360,7 +394,7 @@ export async function startWatcher() {
         http.getBlockNumber().catch(() => null)
       ]);
       const lastLogAgoSec = ((Date.now() - lastAnyLogAt) / 1000) | 0;
-      console.log(`[Health] ws=${wsBN} http=${httpBN} pending=${pending.size} lastLogAgo=${lastLogAgoSec}s`);
+      console.log(`[Health] alive ✓ ws=${wsBN} http=${httpBN} pending=${pending.size} lastLogAgo=${lastLogAgoSec}s`);
     } catch (e) {
       console.error('[Health] combined check failed:', e?.message || e);
     }
@@ -372,8 +406,14 @@ export async function startWatcher() {
     const sinceBlockMs = Date.now() - lastWsBlockAt;
     const chainMoving  = sinceBlockMs < WS_BLOCK_STALL_MS;
 
-    if (idleLogsMs > WS_IDLE_MS && chainMoving) {
-      console.warn(`[WS] No contract logs for ${(idleLogsMs/1000|0)}s while blocks are at ~${latestWsBlock}. Recreating WS + resubscribing…`);
+    // Reconnect if: (A) no logs while chain moving, OR (B) WS hasn't seen blocks for too long (stalled)
+    const shouldReconnectA = idleLogsMs > WS_IDLE_MS && chainMoving;
+    const shouldReconnectB = sinceBlockMs > WS_BLOCK_STALL_MS; // WS appears stalled
+    if (shouldReconnectA || shouldReconnectB) {
+      const reason = shouldReconnectA
+        ? `no logs for ${(idleLogsMs/1000|0)}s while chain moving (ws≈${latestWsBlock})`
+        : `WS stalled (no block events for ${(sinceBlockMs/1000|0)}s)`;
+      console.warn(`[WS] Reconnecting due to ${reason}…`);
       try { await connectAndSubscribe(); }
       catch (e) { console.error('[WS] Reconnect failed:', e?.message || e); }
     }

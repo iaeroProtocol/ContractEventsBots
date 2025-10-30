@@ -40,3 +40,19 @@ if (HEALTH_PORT) {
 // Keep alive in some PaaS
 setInterval(() => {}, 60_000);
 
+// ---- Hardening: make *nothing* fail silently
+process.on('unhandledRejection', (reason) => {
+    console.error('[FATAL] Unhandled promise rejection:', reason);
+  });
+  process.on('uncaughtException', (err) => {
+    console.error('[FATAL] Uncaught exception:', err);
+  });
+  process.on('SIGTERM', () => {
+    console.warn('[Signal] SIGTERM received, exiting…');
+    process.exit(0);
+  });
+  process.on('SIGINT', () => {
+    console.warn('[Signal] SIGINT received, exiting…');
+    process.exit(0);
+  });
+
