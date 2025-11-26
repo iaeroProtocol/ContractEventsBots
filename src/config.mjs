@@ -20,6 +20,7 @@ export const CONFIG = {
   CHAIN_NAME: process.env.CHAIN_NAME || 'base',
   EXPLORER_BASE: process.env.EXPLORER_BASE || 'https://basescan.org',
   VAULT: req('VAULT_ADDRESS'),
+  REWARD_SWAPPER: process.env.REWARD_SWAPPER_ADDRESS || '0x25f11f947309df89bf4d36da5d9a9fb5f1e186c1',
 
   // Backfill + confirmations
   BACKFILL_BLOCKS: parseInt(process.env.BACKFILL_BLOCKS || '500', 10),
@@ -41,6 +42,12 @@ export const CONFIG = {
     { address: '0x08d49DA370ecfFBC4c6Fdd2aE82B2D6aE238Affd', name: 'iAERO/AERO' },
     { address: '0x8966379fCD16F7cB6c6EA61077B6c4fAfECa28f4', name: 'LIQ/USDC' }
   ],
+
+  STABLECOINS: {
+    '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913': { symbol: 'USDC', decimals: 6 },
+    '0x50c5725949a6f0c72e6c4a641f24049a917db0cb': { symbol: 'DAI', decimals: 18 },
+    '0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca': { symbol: 'USDbC', decimals: 6 },
+  },
 
   // Dedupe storage
   // Use a Railway volume mount at /data if available; else local file

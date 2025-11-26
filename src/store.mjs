@@ -60,6 +60,14 @@ export const store = {
     save();
     return true;
   },
+  markSeen(key) {
+    const now = Date.now();
+    prune(now);
+    if (state.seen[key]) return false;
+    state.seen[key] = now;
+    save();
+    return true;
+  },
   has(key) {
     return !!state.seen[key];
   },

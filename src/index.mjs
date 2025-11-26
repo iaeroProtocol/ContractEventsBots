@@ -10,6 +10,7 @@ import { startWatcher } from './watcher.mjs';
 console.log('🔧 Config:', {
   chain: CONFIG.CHAIN_NAME,
   vault: CONFIG.VAULT,
+  swapper: CONFIG.REWARD_SWAPPER,
   ws: CONFIG.WS_URL ? 'ws ok' : 'missing',
   http: CONFIG.HTTP_URL ? 'http ok' : 'missing',
   backfill: CONFIG.BACKFILL_BLOCKS,

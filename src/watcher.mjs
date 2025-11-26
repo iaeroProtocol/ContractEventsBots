@@ -3,7 +3,8 @@ import { ethers } from 'ethers';
 import { CONFIG } from './config.mjs';
 import vaultAbi from './abi/PermalockVault.json' with { type: 'json' };
 import poolAbi from './abi/AerodromePool.json' with { type: 'json' };
-import { linkTx, linkAddr, prettyArgs, sleep, fmtWei } from './utils.mjs';
+import swapperAbi from './abi/RewardSwapper.json' with { type: 'json' };
+import { linkTx, linkAddr, prettyArgs, sleep, fmtWei, short, getTokenInfoBatch, fetchPrices, fmtUsd, fmtNumber } from './utils.mjs';
 import { sendTelegram } from './notify/telegram.mjs';
 import { sendDiscord } from './notify/discord.mjs';
 import { store } from './store.mjs';
@@ -11,11 +12,15 @@ import { store } from './store.mjs';
 /* ---------- ABIs / interfaces ---------- */
 const vaultIface = new ethers.Interface(vaultAbi);
 const poolIface  = new ethers.Interface(poolAbi);
+const swapperIface = new ethers.Interface(swapperAbi);
 
 /* ---------------- Swap signature support ---------------- */
 const TOPIC_V2_CLASSIC = ethers.id('Swap(address,uint256,uint256,uint256,uint256,address)');
 const TOPIC_V2_ALT     = ethers.id('Swap(address,address,uint256,uint256,uint256,uint256)');
 const TOPIC_V3         = ethers.id('Swap(address,address,int256,int256,uint160,uint128,int24)');
+// RewardSwapper event topics
+const TOPIC_PLAN_EXECUTED = ethers.id('PlanExecuted(address,address,uint256,uint256)');
+const TOPIC_SWAP_EXECUTED = ethers.id('SwapExecuted(uint8,address,address,uint256,uint256)');
 
 const coder = ethers.AbiCoder.defaultAbiCoder();
 const addrFromTopic = (t) => ethers.getAddress(ethers.dataSlice(t, 12));
@@ -94,6 +99,47 @@ function formatVaultEvent(name, argsObj, txHash, address, blockNumber, explorerB
   const body   = prettyArgs(argsObj);
   const footer = `\n🔗 Tx: ${linkTx(explorerBase, txHash)}\n🏷️ Contract: ${linkAddr(explorerBase, address)}\n🧱 Block: ${blockNumber}`;
   return `${header}\n${body}\n${footer}`;
+}
+
+const ROUTER_NAMES = {
+  0: 'Aerodrome',
+  1: 'UniV3',
+  2: 'Aggregator',
+};
+
+/**
+ * Format PlanExecuted with enriched swap details
+ */
+function formatPlanExecutedEvent({ caller, recipient, steps, totalOutAmt, swaps, totalUsd, blockNumber, txHash, timestamp, explorerBase }) {
+  const header = `🔄 **RewardSwapper Plan Executed**\n`;
+  
+  let body = '';
+  body += `• Steps: ${steps}\n`;
+  body += `• Recipient: \`${short(recipient)}\`\n`;
+  
+  // Group swaps by output token for cleaner display
+  if (swaps && swaps.length > 0) {
+    body += `\n**Swaps:**\n`;
+    for (const s of swaps) {
+      const routerName = ROUTER_NAMES[s.kind] || `Router(${s.kind})`;
+      body += `  └ ${s.inSymbol} → ${s.outSymbol} via ${routerName}\n`;
+      body += `     ${fmtNumber(s.inHuman, 4)} → ${fmtNumber(s.outHuman, 4)}`;
+      if (s.outUsd > 0) {
+        body += ` (${fmtUsd(s.outUsd)})`;
+      }
+      body += `\n`;
+    }
+  }
+  
+  // Total USD
+  if (totalUsd > 0) {
+    body += `\n💰 **Total Value: ${fmtUsd(totalUsd)}**\n`;
+  }
+  
+  const tsLine = timestamp ? `🕐 ${new Date(timestamp * 1000).toISOString()}\n` : '';
+  const footer = `\n🔗 Tx: ${linkTx(explorerBase, txHash)}\n🧱 Block: ${blockNumber}`;
+  
+  return `${tsLine}${header}\n${body}${footer}`;
 }
 
 /* ---------- dedupe / confirmations ---------- */
@@ -230,6 +276,139 @@ async function handleVaultLog(http, log) {
   }
 }
 
+/**
+ * Handle RewardSwapper PlanExecuted event
+ * Fetches tx receipt to get SwapExecuted details, resolves symbols, fetches prices
+ */
+async function handleSwapperLog(http, log) {
+  const k = keyOf(log);
+
+  if (!(await hasEnoughConf(http, log))) {
+    enqueuePending(log, 'swapper', null);
+    return;
+  }
+  
+  // Only check dedupe, not watermark (watermark can cause issues during backfill)
+  if (store.has(k)) return;
+
+  const { transactionHash, blockNumber, topics, data, address } = log;
+
+  // Only process PlanExecuted events
+  if (topics[0] !== TOPIC_PLAN_EXECUTED) {
+    return;
+  }
+
+  try {
+    // Parse PlanExecuted
+    const parsed = swapperIface.parseLog({ topics, data });
+    if (parsed?.name !== 'PlanExecuted') return;
+
+    const caller = parsed.args[0];
+    const recipient = parsed.args[1];
+    const steps = Number(parsed.args[2]);
+    const totalOutAmt = parsed.args[3];
+
+    console.log(`[Swapper] PlanExecuted tx=${transactionHash} steps=${steps}`);
+
+    // Fetch tx receipt to get all SwapExecuted events
+    const receipt = await http.getTransactionReceipt(transactionHash);
+    const swapperAddr = address.toLowerCase();
+    
+    // Parse SwapExecuted events from the same contract in this tx
+    const swapEvents = [];
+    const allTokens = new Set();
+
+    for (const rLog of receipt.logs) {
+      if (rLog.address.toLowerCase() !== swapperAddr) continue;
+      if (rLog.topics[0] !== TOPIC_SWAP_EXECUTED) continue;
+
+      try {
+        const swapParsed = swapperIface.parseLog({ topics: rLog.topics, data: rLog.data });
+        if (swapParsed?.name === 'SwapExecuted') {
+          const kind = Number(swapParsed.args[0]);
+          const tokenIn = swapParsed.args[1];
+          const outToken = swapParsed.args[2];
+          const inAmt = swapParsed.args[3];
+          const outAmt = swapParsed.args[4];
+          
+          swapEvents.push({ kind, tokenIn, outToken, inAmt, outAmt });
+          allTokens.add(tokenIn.toLowerCase());
+          allTokens.add(outToken.toLowerCase());
+        }
+      } catch { /* skip unparseable */ }
+    }
+
+    // Resolve token symbols and decimals
+    const tokenInfoMap = await getTokenInfoBatch(http, Array.from(allTokens));
+    
+    // Fetch prices for output tokens
+    const outTokens = [...new Set(swapEvents.map(s => s.outToken.toLowerCase()))];
+    const priceMap = await fetchPrices(outTokens, 'base');
+
+    // Build enriched swap list with USD values
+    let totalUsd = 0;
+    const enrichedSwaps = [];
+
+    for (const s of swapEvents) {
+      const inInfo = tokenInfoMap.get(s.tokenIn.toLowerCase()) || { symbol: short(s.tokenIn), decimals: 18 };
+      const outInfo = tokenInfoMap.get(s.outToken.toLowerCase()) || { symbol: short(s.outToken), decimals: 18 };
+      
+      const inHuman = Number(ethers.formatUnits(s.inAmt, inInfo.decimals));
+      const outHuman = Number(ethers.formatUnits(s.outAmt, outInfo.decimals));
+      
+      // Check if output is a known stablecoin (assume $1)
+      const stableInfo = CONFIG.STABLECOINS[s.outToken.toLowerCase()];
+      let outPrice = 0;
+      if (stableInfo) {
+        outPrice = 1.0;
+      } else {
+        outPrice = priceMap.get(s.outToken.toLowerCase()) || 0;
+      }
+      
+      const outUsd = outHuman * outPrice;
+      totalUsd += outUsd;
+
+      enrichedSwaps.push({
+        kind: s.kind,
+        tokenIn: s.tokenIn,
+        outToken: s.outToken,
+        inSymbol: inInfo.symbol,
+        outSymbol: outInfo.symbol,
+        inAmt: s.inAmt,
+        outAmt: s.outAmt,
+        inHuman,
+        outHuman,
+        outUsd,
+      });
+    }
+
+    // Get block timestamp
+    const blk = await http.getBlock(blockNumber).catch(() => null);
+    const timestamp = blk?.timestamp || null;
+
+    // Format and send notification
+    const msg = formatPlanExecutedEvent({
+      caller,
+      recipient,
+      steps,
+      totalOutAmt,
+      swaps: enrichedSwaps,
+      totalUsd,
+      blockNumber,
+      txHash: transactionHash,
+      timestamp,
+      explorerBase: CONFIG.EXPLORER_BASE,
+    });
+
+    console.log('[Notify Swapper]', msg.replace(/\n/g, ' | '));
+    await notifyAll(msg);
+    store.markIfNew(k, blockNumber);
+
+  } catch (e) {
+    console.error('[Swapper] Error handling PlanExecuted:', e?.message || e);
+  }
+}
+
 /* ---------- backfill (startup only) ---------- */
 async function backfill(http, addresses, contractTypes, poolNames) {
   let latest = await http.getBlockNumber();
@@ -245,6 +424,7 @@ async function backfill(http, addresses, contractTypes, poolNames) {
     const logs = await http.getLogs({ address: addresses[i], fromBlock: start, toBlock: latest });
     for (const log of logs) {
       if (contractTypes[i] === 'pool') await handlePoolLog(http, log, poolNames[i]);
+      else if (contractTypes[i] === 'swapper') await handleSwapperLog(http, log);
       else await handleVaultLog(http, log);
       await sleep(50);
     }
@@ -262,6 +442,7 @@ async function sweepRange(http, fromBlock, toBlock, addresses, contractTypes, po
     total += logs.length;
     for (const log of logs) {
       if (contractTypes[i] === 'pool') await handlePoolLog(http, log, poolNames[i]);
+      else if (contractTypes[i] === 'swapper') await handleSwapperLog(http, log);
       else await handleVaultLog(http, log);
       await sleep(20);
     }
@@ -274,11 +455,21 @@ async function sweepRange(http, fromBlock, toBlock, addresses, contractTypes, po
 export async function startWatcher() {
   store.init();
 
-  const vaultAddress  = ethers.getAddress(CONFIG.VAULT);
-  const poolAddresses = CONFIG.POOLS.map(p => ethers.getAddress(p.address));
-  const allAddresses  = [vaultAddress, ...poolAddresses];
-  const contractTypes = ['vault', ...CONFIG.POOLS.map(() => 'pool')];
-  const poolNames     = [null, ...CONFIG.POOLS.map(p => p.name)];
+  const vaultAddress   = ethers.getAddress(CONFIG.VAULT);
+  const swapperAddress = ethers.getAddress(CONFIG.REWARD_SWAPPER);
+  const poolAddresses  = CONFIG.POOLS.map(p => ethers.getAddress(p.address));
+  
+  // All addresses to monitor
+  const allAddresses  = [vaultAddress, swapperAddress, ...poolAddresses];
+  const contractTypes = ['vault', 'swapper', ...CONFIG.POOLS.map(() => 'pool')];
+  const poolNames     = [null, null, ...CONFIG.POOLS.map(p => p.name)];
+
+  console.log(`[Config] Monitoring:`);
+  console.log(`  Vault:    ${vaultAddress}`);
+  console.log(`  Swapper:  ${swapperAddress}`);
+  for (const p of CONFIG.POOLS) {
+    console.log(`  Pool:     ${p.address} (${p.name})`);
+  }
 
   const http = new ethers.JsonRpcProvider(CONFIG.HTTP_URL);
 
@@ -317,12 +508,12 @@ export async function startWatcher() {
                   reconnecting = false; // never get stuck true
                 }
 
-    ws.on('error', (e) => {
+    ws.websocket.on('error', (e) => {
       console.error('[WS error]', e?.message || e);
       // Watchdog below will recreate if needed
     });
 
-    ws.on('close', (code) => {
+    ws.websocket.on('close', (code) => {
             console.warn(`[WS] ❌ Connection closed (code=${code}). Reconnecting…`);
             lastWsBlockAt = 0; // mark stalled
             // kick an immediate reconnect (debounced; don’t wait for watchdog)
@@ -346,8 +537,9 @@ export async function startWatcher() {
     // Build a single combined subscription across vault + pools
     const addrKind = new Map();
     addrKind.set(vaultAddress, { type: 'vault', name: null });
+    addrKind.set(swapperAddress, { type: 'swapper', name: null });
     for (let i = 0; i < poolAddresses.length; i++) {
-      addrKind.set(poolAddresses[i], { type: 'pool', name: poolNames[i] });
+      addrKind.set(poolAddresses[i], { type: 'pool', name: CONFIG.POOLS[i].name });
     }
 
     const allAddrs = Array.from(addrKind.keys());
@@ -357,14 +549,16 @@ export async function startWatcher() {
       const kind = addrKind.get(addr);
       if (!kind) return;
 
-      console.log(`[WS] ✓ ${kind.type === 'vault' ? 'Vault' : kind.name} event:`,
+      const kindLabel = kind.type === 'vault' ? 'Vault' : kind.type === 'swapper' ? 'Swapper' : kind.name;
+      console.log(`[WS] ✓ ${kindLabel} event:`,
         log.transactionHash, 'Block:', log.blockNumber, '| topic0=', log.topics?.[0]);
 
       try {
         if (kind.type === 'vault') await handleVaultLog(http, log);
+        else if (kind.type === 'swapper') await handleSwapperLog(http, log);
         else await handlePoolLog(http, log, kind.name);
       } catch (e) {
-        console.error(`[Handle ${kind.type === 'vault' ? 'vault' : kind.name} log error]`, e?.message || e);
+        console.error(`[Handle ${kindLabel} log error]`, e?.message || e);
       }
     });
 
@@ -381,6 +575,7 @@ export async function startWatcher() {
       if (await hasEnoughConf(http, log)) {
         pending.delete(keyOf(log));
         if (contractType === 'pool') await handlePoolLog(http, log, poolName);
+        else if (contractType === 'swapper') await handleSwapperLog(http, log);
         else await handleVaultLog(http, log);
       }
     }

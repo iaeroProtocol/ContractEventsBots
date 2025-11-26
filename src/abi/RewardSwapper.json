@@ -1,0 +1,25 @@
+[
+  {
+    "type": "event",
+    "name": "SwapExecuted",
+    "inputs": [
+      { "indexed": false, "name": "kind", "type": "uint8" },
+      { "indexed": true, "name": "tokenIn", "type": "address" },
+      { "indexed": true, "name": "outToken", "type": "address" },
+      { "indexed": false, "name": "inAmt", "type": "uint256" },
+      { "indexed": false, "name": "outAmt", "type": "uint256" }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PlanExecuted",
+    "inputs": [
+      { "indexed": true, "name": "caller", "type": "address" },
+      { "indexed": true, "name": "recipient", "type": "address" },
+      { "indexed": false, "name": "steps", "type": "uint256" },
+      { "indexed": false, "name": "totalOutAmt", "type": "uint256" }
+    ],
+    "anonymous": false
+  }
+]
