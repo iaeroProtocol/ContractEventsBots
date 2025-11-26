@@ -39,9 +39,24 @@ export const CONFIG = {
   },
   
   POOLS: [
-    { address: '0x08d49DA370ecfFBC4c6Fdd2aE82B2D6aE238Affd', name: 'iAERO/AERO' },
-    { address: '0x8966379fCD16F7cB6c6EA61077B6c4fAfECa28f4', name: 'LIQ/USDC' },
-    { address: '0xa1b79a66994878476a9dcb20e50969a7d641229c', name: 'iAERO/AERO (CL)' },
+    { 
+      address: '0x08d49DA370ecfFBC4c6Fdd2aE82B2D6aE238Affd', 
+      name: 'iAERO/AERO',
+      token0: { symbol: 'iAERO', decimals: 18 },
+      token1: { symbol: 'AERO', decimals: 18 }
+    },
+    { 
+      address: '0x8966379fCD16F7cB6c6EA61077B6c4fAfECa28f4', 
+      name: 'LIQ/USDC',
+      token0: { symbol: 'LIQ', decimals: 18 },
+      token1: { symbol: 'USDC', decimals: 6 }
+    },
+    { 
+      address: '0xa1b79a66994878476a9dcb20e50969a7d641229c', 
+      name: 'iAERO/AERO (CL)',
+      token0: { symbol: 'iAERO', decimals: 18 },
+      token1: { symbol: 'AERO', decimals: 18 }
+    },
   ],
 
   STABLECOINS: {

@@ -13,6 +13,9 @@ import { store } from './store.mjs';
 const vaultIface = new ethers.Interface(vaultAbi);
 const poolIface  = new ethers.Interface(poolAbi);
 const swapperIface = new ethers.Interface(swapperAbi);
+const poolConfigByAddr = new Map(
+  CONFIG.POOLS.map(p => [ethers.getAddress(p.address).toLowerCase(), p])
+);
 
 /* ---------------- Swap signature support ---------------- */
 const TOPIC_V2_CLASSIC = ethers.id('Swap(address,uint256,uint256,uint256,uint256,address)');
@@ -78,18 +81,28 @@ async function notifyAll(text) {
 }
 
 /* ---------- formatting ---------- */
-function formatSwapEvent(poolName, argsObj, txHash, address, blockNumber, explorerBase) {
+function formatSwapEvent(poolConfig, argsObj, txHash, address, blockNumber, explorerBase) {
   const { sender, to, amount0In, amount1In, amount0Out, amount1Out } = argsObj;
+  
+  const t0 = poolConfig?.token0 || { symbol: 'token0', decimals: 18 };
+  const t1 = poolConfig?.token1 || { symbol: 'token1', decimals: 18 };
+  const poolName = poolConfig?.name || 'Unknown Pool';
+  
+  // Format amounts with proper decimals
+  const fmt = (amt, token) => fmtNumber(Number(ethers.formatUnits(amt, token.decimals)), 4);
+  
   let tradeDesc = '';
   if (amount0In > 0n && amount1Out > 0n) {
-    tradeDesc = `Bought token1: ${fmtWei(amount1Out)} (sold ${fmtWei(amount0In)} token0)`;
+    tradeDesc = `Bought ${fmt(amount1Out, t1)} ${t1.symbol} (sold ${fmt(amount0In, t0)} ${t0.symbol})`;
   } else if (amount1In > 0n && amount0Out > 0n) {
-    tradeDesc = `Bought token0: ${fmtWei(amount0Out)} (sold ${fmtWei(amount1In)} token1)`;
+    tradeDesc = `Bought ${fmt(amount0Out, t0)} ${t0.symbol} (sold ${fmt(amount1In, t1)} ${t1.symbol})`;
   } else {
-    tradeDesc = `Swap executed (amount0In=${fmtWei(amount0In)}, amount1In=${fmtWei(amount1In)}, amount0Out=${fmtWei(amount0Out)}, amount1Out=${fmtWei(amount1Out)})`;
+    // Fallback: show all amounts (rare edge case)
+    tradeDesc = `Swap: ${fmt(amount0In, t0)} ${t0.symbol} in, ${fmt(amount1In, t1)} ${t1.symbol} in → ${fmt(amount0Out, t0)} ${t0.symbol} out, ${fmt(amount1Out, t1)} ${t1.symbol} out`;
   }
-  const header = `**Swap on ${poolName}**\n`;
-  const body   = `• ${tradeDesc}\n• Sender: ${sender}\n• To: ${to}`;
+  
+  const header = `🔄 **Swap on ${poolName}**\n`;
+  const body   = `• ${tradeDesc}\n• Sender: \`${short(sender)}\`\n• To: \`${short(to)}\``;
   const footer = `\n🔗 Tx: ${linkTx(explorerBase, txHash)}\n🏷️ Pool: ${linkAddr(explorerBase, address)}\n🧱 Block: ${blockNumber}`;
   return `${header}\n${body}\n${footer}`;
 }
@@ -240,7 +253,8 @@ async function handlePoolLog(http, log, poolName) {
   try {
     const blk = await http.getBlock(blockNumber).catch(() => null);
     const tsLine = blk ? `🕐 ${new Date(blk.timestamp * 1000).toISOString()}\n` : '';
-    const msg = `${tsLine}${formatSwapEvent(poolName, argsObj, transactionHash, address, blockNumber, CONFIG.EXPLORER_BASE)}`;
+    const poolConfig = poolConfigByAddr.get(address.toLowerCase());
+    const msg = `${tsLine}${formatSwapEvent(poolConfig, argsObj, transactionHash, address, blockNumber, CONFIG.EXPLORER_BASE)}`;
     console.log('[Notify Swap]', msg.replace(/\n/g, ' | '));
     await notifyAll(msg);
     // Only after successful notify, mark + advance watermark
