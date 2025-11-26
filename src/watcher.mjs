@@ -583,17 +583,17 @@ export async function startWatcher() {
 
   // Drain pending once confirmations are met
   setInterval(async () => {
-    if (pending.size === 0) return;
-    const entries = Array.from(pending.values());
-    for (const { log, contractType, poolName } of entries) {
-      if (await hasEnoughConf(http, log)) {
-        pending.delete(keyOf(log));
-        if (contractType === 'pool') await handlePoolLog(http, log, poolName);
-        else if (contractType === 'swapper') await handleSwapperLog(http, log);
-        else await handleVaultLog(http, log);
-      }
+    try {
+      const [wsBN, httpBN] = await Promise.all([
+        ws?.getBlockNumber?.().catch(() => null),  // Add optional chaining
+        http.getBlockNumber().catch(() => null)
+      ]);
+      const lastLogAgoSec = ((Date.now() - lastAnyLogAt) / 1000) | 0;
+      console.log(`[Health] alive ✓ ws=${wsBN ?? 'reconnecting'} http=${httpBN} pending=${pending.size} lastLogAgo=${lastLogAgoSec}s`);
+    } catch (e) {
+      console.error('[Health] combined check failed:', e?.message || e);
     }
-  }, 5000);
+  }, 120_000);
 
   // Health + visibility (both heights, pending size, idle age)
   setInterval(async () => {
