@@ -40,7 +40,8 @@ export const CONFIG = {
   
   POOLS: [
     { address: '0x08d49DA370ecfFBC4c6Fdd2aE82B2D6aE238Affd', name: 'iAERO/AERO' },
-    { address: '0x8966379fCD16F7cB6c6EA61077B6c4fAfECa28f4', name: 'LIQ/USDC' }
+    { address: '0x8966379fCD16F7cB6c6EA61077B6c4fAfECa28f4', name: 'LIQ/USDC' },
+    { address: '0xa1b79a66994878476a9dcb20e50969a7d641229c', name: 'iAERO/AERO (CL)' },
   ],
 
   STABLECOINS: {
