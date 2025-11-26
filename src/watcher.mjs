@@ -566,7 +566,7 @@ export async function startWatcher() {
       addrKind.set(poolAddresses[i], { type: 'pool', name: CONFIG.POOLS[i].name });
     }
 
-    const allAddrs = Array.from(addrKind.keys());
+    const allAddrs = Array.from(addrKind.keys()).map(a => a.toLowerCase());
     ws.on({ address: allAddrs }, async (log) => {
       lastAnyLogAt = Date.now();
       const addr = ethers.getAddress(log.address);
