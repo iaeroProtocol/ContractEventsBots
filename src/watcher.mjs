@@ -80,6 +80,9 @@ async function notifyAll(text) {
   lastSentAt = Date.now();
 }
 
+let lastConnectAt = 0;  // Add this near the other state variables (around line 149)
+
+
 /* ---------- formatting ---------- */
 function formatSwapEvent(poolConfig, argsObj, txHash, address, blockNumber, explorerBase) {
   const { sender, to, amount0In, amount1In, amount0Out, amount1Out } = argsObj;
@@ -165,7 +168,6 @@ let lastWsBlockAt = Date.now(); // timestamp of last block tick
 let lastAnyLogAt  = Date.now(); // timestamp of last contract log
 let reconnecting  = false;      // re-entrancy guard
 let reconnectTimer = null;      // debounce immediate reconnect
-let reconnectBackoffMs = 1000;  // 1s → capped backoff
 
 const WS_IDLE_MS         = CONFIG.WS_IDLE_MS ?? 10 * 60_000; // 10 minutes
 const SWEEP_INTERVAL_MS  = CONFIG.SWEEP_INTERVAL_MS ?? 15_000; // 15s (set to 0 to disable)
@@ -500,48 +502,56 @@ export async function startWatcher() {
   /* --- (Re)connectable WS + combined subscription --- */
   async function connectAndSubscribe() {
     if (reconnecting) {
-            return; // another caller is already reconnecting
-          }
-          reconnecting = true;
-          try {
-                  if (ws) {
-                    try {
-                      ws.removeAllListeners?.();
-                      ws.destroy?.();
-                    } catch {}
-                    ws = undefined;
-                    // tiny backoff to let sockets close
-                    await sleep(300);
-                  }
-            
-                  ws = new ethers.WebSocketProvider(CONFIG.WS_URL);
-                  await ws.ready;
-                  console.log('[WS] ✅ Connection established');
-                  reconnectBackoffMs = 1000; // reset backoff on success
-                } finally {
-                  reconnecting = false; // never get stuck true
-                }
-
+      return;
+    }
+    reconnecting = true;
+    try {
+      if (ws) {
+        try {
+          ws.removeAllListeners?.();
+          ws.destroy?.();
+        } catch {}
+        ws = undefined;
+        await sleep(300);
+      }
+  
+      ws = new ethers.WebSocketProvider(CONFIG.WS_URL);
+      await ws.ready;
+      console.log('[WS] ✅ Connection established');
+      lastConnectAt = Date.now();  // Track when we connected
+      
+      // Only reset backoff if last connection stayed alive > 30 seconds
+      // (moved from here - don't reset immediately)
+    } finally {
+      reconnecting = false;
+    }
+  
     ws.websocket.on('error', (e) => {
       console.error('[WS error]', e?.message || e);
-      // Watchdog below will recreate if needed
     });
-
+  
     ws.websocket.on('close', (code) => {
-            console.warn(`[WS] ❌ Connection closed (code=${code}). Reconnecting…`);
-            lastWsBlockAt = 0; // mark stalled
-            // kick an immediate reconnect (debounced; don’t wait for watchdog)
-            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-            const delay = reconnectBackoffMs;
-            reconnectTimer = setTimeout(() => {
-              reconnectTimer = null;
-              connectAndSubscribe().catch(e => {
-                console.error('[WS] immediate reconnect failed:', e?.message || e);
-                reconnectBackoffMs = Math.min(reconnectBackoffMs * 2, 30_000); // cap at 30s
-              });
-              // bump backoff on failure; reset on success in connectAndSubscribe()
-            }, delay);
-          });
+      const aliveMs = Date.now() - lastConnectAt;
+      console.warn(`[WS] ❌ Connection closed (code=${code}, alive=${(aliveMs/1000)|0}s). Reconnecting…`);
+      lastWsBlockAt = 0;
+      
+      // Only reset backoff if connection was stable (>30s)
+      if (aliveMs > 30_000) {
+        reconnectBackoffMs = 1000;
+      } else {
+        // Connection died quickly - increase backoff
+        reconnectBackoffMs = Math.min(reconnectBackoffMs * 2, 60_000);
+        console.warn(`[WS] Unstable connection, backoff now ${reconnectBackoffMs}ms`);
+      }
+      
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connectAndSubscribe().catch(e => {
+          console.error('[WS] immediate reconnect failed:', e?.message || e);
+        });
+      }, reconnectBackoffMs);
+    });
 
     ws.on('block', (bn) => {
       latestWsBlock = Number(bn);
