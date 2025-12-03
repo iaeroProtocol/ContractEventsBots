@@ -182,9 +182,11 @@ export async function startWatcher(chainConfig = null) {
   const wsUrl = chainConfig?.wsUrl || CONFIG.WS_URL;
   const httpUrl = chainConfig?.httpUrl || CONFIG.HTTP_URL;
   const rewardSwapper = chainConfig?.rewardSwapper || CONFIG.REWARD_SWAPPER;
-  const vault = chainConfig?.vault || CONFIG.VAULT || null;
-  const pools = chainConfig?.pools || CONFIG.POOLS || [];
-  const stablecoins = chainConfig?.stablecoins || CONFIG.STABLECOINS || {};
+  // FIXED: Only use CONFIG.VAULT in legacy mode (when chainConfig is null)
+  // In multi-chain mode, use chainConfig.vault directly (null for non-Base chains)
+  const vault = isMultiChain ? (chainConfig.vault || null) : (CONFIG.VAULT || null);
+  const pools = isMultiChain ? (chainConfig.pools || []) : (CONFIG.POOLS || []);
+  const stablecoins = isMultiChain ? (chainConfig.stablecoins || {}) : (CONFIG.STABLECOINS || {});
   
   const tag = `[${chainEmoji} ${chainName}]`;
   
@@ -441,7 +443,10 @@ export async function startWatcher(chainConfig = null) {
 
   // ─────────────────────────────────────────────────────────────────────────
   // Backfill & Sweep (use chain-specific store)
+  // FIXED: Chunk requests to respect RPC block limits (e.g., Avalanche 10k, Alchemy 10k)
   // ─────────────────────────────────────────────────────────────────────────
+  const BACKFILL_CHUNK_SIZE = 2000; // Safe for all RPCs
+  
   async function backfill(http, addresses, contractTypes, poolNames) {
     let latest = await http.getBlockNumber();
     if (CONFIG.CONFIRMATIONS > 0) latest -= CONFIG.CONFIRMATIONS;
@@ -451,30 +456,70 @@ export async function startWatcher(chainConfig = null) {
     const start = Math.max(fromWatermark, fromBackfill);
     if (start >= latest) return;
 
-    console.log(`${tag} [Backfill] from ${start} to ${latest}…`);
+    const totalBlocks = latest - start;
+    console.log(`${tag} [Backfill] from ${start} to ${latest} (${totalBlocks} blocks)…`);
+    
     for (let i = 0; i < addresses.length; i++) {
-      const logs = await http.getLogs({ address: addresses[i], fromBlock: start, toBlock: latest });
-      for (const log of logs) {
-        if (contractTypes[i] === 'pool') await handlePoolLog(http, log, poolNames[i]);
-        else if (contractTypes[i] === 'swapper') await handleSwapperLog(http, log);
-        else await handleVaultLog(http, log);
-        await sleep(50);
+      let totalLogs = 0;
+      
+      // Chunk the request to avoid RPC block limits
+      for (let chunkStart = start; chunkStart <= latest; chunkStart += BACKFILL_CHUNK_SIZE + 1) {
+        const chunkEnd = Math.min(chunkStart + BACKFILL_CHUNK_SIZE, latest);
+        
+        try {
+          const logs = await http.getLogs({ 
+            address: addresses[i], 
+            fromBlock: chunkStart, 
+            toBlock: chunkEnd 
+          });
+          
+          for (const log of logs) {
+            if (contractTypes[i] === 'pool') await handlePoolLog(http, log, poolNames[i]);
+            else if (contractTypes[i] === 'swapper') await handleSwapperLog(http, log);
+            else await handleVaultLog(http, log);
+            await sleep(50);
+          }
+          totalLogs += logs.length;
+        } catch (e) {
+          console.error(`${tag} [Backfill] chunk ${chunkStart}-${chunkEnd} failed:`, e?.message || e);
+          // Continue with next chunk rather than failing entirely
+        }
+        
+        // Small delay between chunks to avoid rate limiting
+        await sleep(100);
       }
-      console.log(`${tag} [Backfill] ${addresses[i]} done (${logs.length} logs)`);
+      
+      console.log(`${tag} [Backfill] ${addresses[i]} done (${totalLogs} logs)`);
     }
     store.setWatermark(latest);
   }
 
   async function sweepRange(http, fromBlock, toBlock, addresses, contractTypes, poolNames) {
+    // FIXED: Chunk sweep requests too
+    const SWEEP_CHUNK_SIZE = 2000;
     let total = 0;
+    
     for (let i = 0; i < addresses.length; i++) {
-      const logs = await http.getLogs({ address: addresses[i], fromBlock, toBlock });
-      total += logs.length;
-      for (const log of logs) {
-        if (contractTypes[i] === 'pool') await handlePoolLog(http, log, poolNames[i]);
-        else if (contractTypes[i] === 'swapper') await handleSwapperLog(http, log);
-        else await handleVaultLog(http, log);
-        await sleep(20);
+      for (let chunkStart = fromBlock; chunkStart <= toBlock; chunkStart += SWEEP_CHUNK_SIZE + 1) {
+        const chunkEnd = Math.min(chunkStart + SWEEP_CHUNK_SIZE, toBlock);
+        
+        try {
+          const logs = await http.getLogs({ 
+            address: addresses[i], 
+            fromBlock: chunkStart, 
+            toBlock: chunkEnd 
+          });
+          total += logs.length;
+          
+          for (const log of logs) {
+            if (contractTypes[i] === 'pool') await handlePoolLog(http, log, poolNames[i]);
+            else if (contractTypes[i] === 'swapper') await handleSwapperLog(http, log);
+            else await handleVaultLog(http, log);
+            await sleep(20);
+          }
+        } catch (e) {
+          console.error(`${tag} [Sweep] chunk ${chunkStart}-${chunkEnd} failed:`, e?.message || e);
+        }
       }
     }
     if (total === 0) store.setWatermark(toBlock);
