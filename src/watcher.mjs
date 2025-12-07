@@ -1,5 +1,6 @@
 // src/watcher.mjs
 // UPDATED: Added chainConfig parameter for multi-chain support
+// UPDATED: HTTP-only mode - removed WebSocket, uses polling instead
 // All chain-specific state is now encapsulated inside startWatcher()
 
 import { ethers } from 'ethers';
@@ -160,12 +161,12 @@ function buildArgsObjFromAbiParsed(parsed) {
   return argsObj;
 }
 
-const WS_IDLE_MS = CONFIG.WS_IDLE_MS ?? 10 * 60_000;
-const SWEEP_INTERVAL_MS = CONFIG.SWEEP_INTERVAL_MS ?? 15_000;
-const WS_BLOCK_STALL_MS = CONFIG.WS_BLOCK_STALL_MS ?? 180_000;
+// Polling interval - default 5 minutes (configurable via env)
+const POLL_INTERVAL_MS = CONFIG.POLL_INTERVAL_MS ?? 300_000;
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * UPDATED: startWatcher now accepts chainConfig parameter
+ * UPDATED: HTTP-only mode - no WebSocket, just polling
  * For backwards compat, chainConfig is optional - falls back to legacy CONFIG
  * ═══════════════════════════════════════════════════════════════════════════ */
 export async function startWatcher(chainConfig = null) {
@@ -179,7 +180,6 @@ export async function startWatcher(chainConfig = null) {
   const chainEmoji = chainConfig?.emoji || '🔵';
   const explorerBase = chainConfig?.explorerBase || CONFIG.EXPLORER_BASE;
   const llamaChain = chainConfig?.llamaChain || 'base';
-  const wsUrl = chainConfig?.wsUrl || CONFIG.WS_URL;
   const httpUrl = chainConfig?.httpUrl || CONFIG.HTTP_URL;
   const rewardSwapper = chainConfig?.rewardSwapper || CONFIG.REWARD_SWAPPER;
   // FIXED: Only use CONFIG.VAULT in legacy mode (when chainConfig is null)
@@ -197,17 +197,8 @@ export async function startWatcher(chainConfig = null) {
   store.init();
   
   // ─────────────────────────────────────────────────────────────────────────
-  // Per-chain state (moved from module level)
+  // Per-chain state
   // ─────────────────────────────────────────────────────────────────────────
-  let ws;
-  let latestWsBlock = 0;
-  let lastWsBlockAt = Date.now();
-  let lastAnyLogAt = Date.now();
-  let reconnecting = false;
-  let reconnectTimer = null;
-  let reconnectBackoffMs = 1000;
-  let lastConnectAt = 0;
-  
   const pending = new Map();
   
   const poolConfigByAddr = new Map(
@@ -218,17 +209,11 @@ export async function startWatcher(chainConfig = null) {
   // Helper functions (use chain-specific store and config)
   // ─────────────────────────────────────────────────────────────────────────
   async function latestBlockSafe(http) {
-    const results = await Promise.allSettled([
-      http.getBlockNumber(),
-      ws?.getBlockNumber?.()
-    ]);
-    let best = 0;
-    for (const r of results) {
-      if (r.status === 'fulfilled' && Number.isFinite(Number(r.value))) {
-        best = Math.max(best, Number(r.value));
-      }
+    try {
+      return await http.getBlockNumber();
+    } catch {
+      return 0;
     }
-    return best;
   }
   
   async function hasEnoughConf(http, log) {
@@ -568,144 +553,39 @@ export async function startWatcher(chainConfig = null) {
   await backfill(http, allAddresses, contractTypes, poolNames);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // WebSocket connection (uses chain-specific wsUrl)
+  // HTTP Polling loop (replaces WebSocket)
   // ─────────────────────────────────────────────────────────────────────────
-  async function connectAndSubscribe() {
-    if (reconnecting) return;
-    reconnecting = true;
-    try {
-      if (ws) {
-        try {
-          ws.removeAllListeners?.();
-          ws.destroy?.();
-        } catch {}
-        ws = undefined;
-        await sleep(300);
-      }
+  console.log(`${tag} Starting HTTP polling (interval: ${POLL_INTERVAL_MS / 1000}s)`);
   
-      ws = new ethers.WebSocketProvider(wsUrl);
-      await ws.ready;
-      console.log(`${tag} [WS] ✅ Connected`);
-      lastConnectAt = Date.now();
-    } finally {
-      reconnecting = false;
-    }
-  
-    ws.websocket.on('error', (e) => {
-      console.error(`${tag} [WS error]`, e?.message || e);
-    });
-  
-    ws.websocket.on('close', (code) => {
-      const aliveMs = Date.now() - lastConnectAt;
-      console.warn(`${tag} [WS] ❌ Closed (code=${code}, alive=${(aliveMs/1000)|0}s)`);
-      lastWsBlockAt = 0;
+  (async function pollLoop() {
+    while (true) {
+      await sleep(POLL_INTERVAL_MS);
       
-      if (aliveMs > 30_000) {
-        reconnectBackoffMs = 1000;
-      } else {
-        reconnectBackoffMs = Math.min(reconnectBackoffMs * 2, 60_000);
-        console.warn(`${tag} Unstable, backoff=${reconnectBackoffMs}ms`);
-      }
-      
-      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-      reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-        connectAndSubscribe().catch(e => {
-          console.error(`${tag} [WS] Reconnect failed:`, e?.message || e);
-        });
-      }, reconnectBackoffMs);
-    });
-
-    ws.on('block', (bn) => {
-      latestWsBlock = Number(bn);
-      lastWsBlockAt = Date.now();
-    });
-
-    // Build address lookup
-    const addrKind = new Map();
-    addrKind.set(swapperAddress, { type: 'swapper', name: null });
-    if (vaultAddress) {
-      addrKind.set(vaultAddress, { type: 'vault', name: null });
-    }
-    for (let i = 0; i < poolAddresses.length; i++) {
-      addrKind.set(poolAddresses[i], { type: 'pool', name: pools[i].name });
-    }
-
-    const allAddrs = Array.from(addrKind.keys()).map(a => a.toLowerCase());
-    ws.on({ address: allAddrs }, async (log) => {
-      lastAnyLogAt = Date.now();
-      const addr = ethers.getAddress(log.address);
-      const kind = addrKind.get(addr);
-      if (!kind) return;
-
-      const kindLabel = kind.type === 'vault' ? 'Vault' : kind.type === 'swapper' ? 'Swapper' : kind.name;
-      console.log(`${tag} [WS] Event: ${kindLabel}`, log.transactionHash, 'Block:', log.blockNumber);
-
       try {
-        if (kind.type === 'vault') await handleVaultLog(http, log);
-        else if (kind.type === 'swapper') await handleSwapperLog(http, log);
-        else await handlePoolLog(http, log, kind.name);
+        let latest = await latestBlockSafe(http);
+        if (CONFIG.CONFIRMATIONS > 0) latest -= CONFIG.CONFIRMATIONS;
+
+        const from = store.getWatermark() + 1;
+        if (from <= latest) {
+          console.log(`${tag} [Poll] Checking blocks ${from}→${latest}`);
+          await sweepRange(http, from, latest, allAddresses, contractTypes, poolNames);
+        }
       } catch (e) {
-        console.error(`${tag} [Handle error]`, e?.message || e);
+        console.error(`${tag} [Poll] error:`, e?.message || e);
       }
-    });
+    }
+  })();
 
-    console.log(`${tag} [Live] Subscribed to ${allAddrs.length} address(es)`);
-  }
-
-  await connectAndSubscribe();
-
-  // Health check
+  // Health check (just logs status periodically)
   setInterval(async () => {
     try {
-      const [wsBN, httpBN] = await Promise.all([
-        ws?.getBlockNumber?.().catch(() => null),
-        http.getBlockNumber().catch(() => null)
-      ]);
-      const lastLogAgoSec = ((Date.now() - lastAnyLogAt) / 1000) | 0;
-      console.log(`${tag} [Health] ✓ ws=${wsBN ?? 'reconnecting'} http=${httpBN} pending=${pending.size} lastLogAgo=${lastLogAgoSec}s`);
+      const httpBN = await http.getBlockNumber().catch(() => null);
+      const wm = store.getWatermark();
+      console.log(`${tag} [Health] ✓ block=${httpBN} watermark=${wm} pending=${pending.size}`);
     } catch (e) {
       console.error(`${tag} [Health] check failed:`, e?.message || e);
     }
-  }, 120_000);
-
-  // WS watchdog
-  setInterval(async () => {
-    const idleLogsMs = Date.now() - lastAnyLogAt;
-    const sinceBlockMs = Date.now() - lastWsBlockAt;
-    const chainMoving = sinceBlockMs < WS_BLOCK_STALL_MS;
-
-    const shouldReconnectA = idleLogsMs > WS_IDLE_MS && chainMoving;
-    const shouldReconnectB = sinceBlockMs > WS_BLOCK_STALL_MS;
-    if (shouldReconnectA || shouldReconnectB) {
-      const reason = shouldReconnectA
-        ? `no logs for ${(idleLogsMs/1000|0)}s while chain moving (ws≈${latestWsBlock})`
-        : `WS stalled (no block events for ${(sinceBlockMs/1000|0)}s)`;
-      console.warn(`${tag} [WS] Reconnecting: ${reason}`);
-      try { await connectAndSubscribe(); }
-      catch (e) { console.error(`${tag} [WS] Reconnect failed:`, e?.message || e); }
-    }
-  }, 60_000);
-
-  // Sweep backstop
-  if (SWEEP_INTERVAL_MS !== 0) {
-    (async function sweepLoop() {
-      while (true) {
-        try {
-          let latest = await latestBlockSafe(http);
-          if (CONFIG.CONFIRMATIONS > 0) latest -= CONFIG.CONFIRMATIONS;
-
-          const from = store.getWatermark() + 1;
-          if (from <= latest) {
-            await sweepRange(http, from, latest, allAddresses, contractTypes, poolNames);
-          }
-        } catch (e) {
-          console.error(`${tag} [Sweep] error:`, e?.message || e);
-        }
-        await sleep(SWEEP_INTERVAL_MS);
-      }
-    })();
-  }
+  }, 300_000); // Every 5 minutes
 
   console.log(`${tag} Watcher started ✅`);
   return { chainKey, store };

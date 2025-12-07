@@ -1,5 +1,6 @@
 // src/index.mjs
 // UPDATED: Multi-chain support - starts watchers for all enabled chains
+// UPDATED: HTTP-only mode
 
 if (process.env.NODE_ENV !== 'production') {
   try {
@@ -11,12 +12,12 @@ import { CONFIG } from './config.mjs';
 import { startWatcher } from './watcher.mjs';
 
 console.log('═══════════════════════════════════════════════════════════');
-console.log('  🔗 RewardSwapper Event Bot');
+console.log('  🔗 RewardSwapper Event Bot (HTTP Polling)');
 console.log('═══════════════════════════════════════════════════════════');
 console.log('');
 
 // ═══════════════════════════════════════════════════════════════════════════
-// NEW: Show enabled chains
+// Show enabled chains
 // ═══════════════════════════════════════════════════════════════════════════
 if (CONFIG.CHAINS.length > 0) {
   console.log(`📋 Multi-chain mode: ${CONFIG.CHAINS.length} chain(s) enabled`);
@@ -39,6 +40,7 @@ console.log('');
 
 // Show shared config
 console.log('⚙️  Settings:');
+console.log(`   Poll interval: ${CONFIG.POLL_INTERVAL_MS / 1000}s`);
 console.log(`   Backfill blocks: ${CONFIG.BACKFILL_BLOCKS}`);
 console.log(`   Confirmations:   ${CONFIG.CONFIRMATIONS}`);
 console.log('');
@@ -62,7 +64,7 @@ if (HEALTH_PORT) {
 (async () => {
   try {
     // ═══════════════════════════════════════════════════════════════════════
-    // NEW: Multi-chain startup
+    // Multi-chain startup
     // ═══════════════════════════════════════════════════════════════════════
     if (CONFIG.CHAINS.length > 0) {
       // Start all chain watchers in parallel
@@ -99,11 +101,12 @@ if (HEALTH_PORT) {
     } else {
       // ═══════════════════════════════════════════════════════════════════════
       // Legacy single-chain mode (backwards compatible)
+      // UPDATED: Only check HTTP_URL now
       // ═══════════════════════════════════════════════════════════════════════
-      if (!CONFIG.WS_URL || !CONFIG.HTTP_URL) {
+      if (!CONFIG.HTTP_URL) {
         console.error('❌ No chains configured!');
-        console.error('   Set RPC URLs like: BASE_RPC_WS_URL=wss://... BASE_RPC_HTTP_URL=https://...');
-        console.error('   Or use legacy: RPC_WS_URL=wss://... RPC_HTTP_URL=https://...');
+        console.error('   Set RPC URLs like: BASE_RPC_HTTP_URL=https://...');
+        console.error('   Or use legacy: RPC_HTTP_URL=https://...');
         process.exit(1);
       }
       

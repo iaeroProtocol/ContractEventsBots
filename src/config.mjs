@@ -1,5 +1,6 @@
 // src/config.mjs
 // UPDATED: Added multi-chain support
+// UPDATED: HTTP-only mode - no WebSocket URLs required
 
 if (process.env.NODE_ENV !== 'production') {
   try {
@@ -147,25 +148,25 @@ const CHAIN_DEFINITIONS = {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// NEW: Helper to get RPC URLs for a chain from env vars
+// Helper to get RPC URLs for a chain from env vars
+// UPDATED: Only HTTP URL is required now (no WebSocket needed)
 // ═══════════════════════════════════════════════════════════════════════════
 function getChainRpcUrls(chainKey) {
   const upper = chainKey.toUpperCase();
   
   // Try multiple env var patterns for flexibility
-  const wsPatterns = [`${upper}_RPC_WS_URL`, `${upper}_WS_URL`, `RPC_WS_URL_${upper}`];
   const httpPatterns = [`${upper}_RPC_HTTP_URL`, `${upper}_HTTP_URL`, `RPC_HTTP_URL_${upper}`];
   
-  let wsUrl = null, httpUrl = null;
+  let httpUrl = null;
   
-  for (const p of wsPatterns) if (process.env[p]) { wsUrl = process.env[p]; break; }
   for (const p of httpPatterns) if (process.env[p]) { httpUrl = process.env[p]; break; }
   
-  return { wsUrl, httpUrl };
+  return { httpUrl };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// NEW: Get list of enabled chains (those with valid RPC URLs)
+// Get list of enabled chains (those with valid RPC URLs)
+// UPDATED: Only require HTTP URL now
 // ═══════════════════════════════════════════════════════════════════════════
 function getEnabledChains() {
   const enabledList = process.env.ENABLED_CHAINS
@@ -181,13 +182,13 @@ function getEnabledChains() {
       continue;
     }
     
-    const { wsUrl, httpUrl } = getChainRpcUrls(chainKey);
+    const { httpUrl } = getChainRpcUrls(chainKey);
     
-    if (!wsUrl || !httpUrl) {
+    if (!httpUrl) {
       // Silent skip - only log if explicitly requested via ENABLED_CHAINS
       if (process.env.ENABLED_CHAINS) {
-        console.warn(`[Config] ${chainDef.name}: Missing RPC URLs, skipping`);
-        console.warn(`  Set ${chainKey.toUpperCase()}_RPC_WS_URL and ${chainKey.toUpperCase()}_RPC_HTTP_URL`);
+        console.warn(`[Config] ${chainDef.name}: Missing RPC URL, skipping`);
+        console.warn(`  Set ${chainKey.toUpperCase()}_RPC_HTTP_URL`);
       }
       continue;
     }
@@ -195,7 +196,6 @@ function getEnabledChains() {
     enabled.push({
       key: chainKey,
       ...chainDef,
-      wsUrl,
       httpUrl,
     });
   }
@@ -211,7 +211,7 @@ const STATE_PATH_BASE = (() => {
 
 export const CONFIG = {
   // ═══════════════════════════════════════════════════════════════════════════
-  // NEW: Multi-chain support
+  // Multi-chain support
   // ═══════════════════════════════════════════════════════════════════════════
   CHAINS: getEnabledChains(),
   CHAIN_DEFINITIONS,
@@ -219,7 +219,6 @@ export const CONFIG = {
   
   // Legacy single-chain config (kept for backwards compatibility)
   // These are used if you want to run single-chain mode
-  WS_URL: process.env.RPC_WS_URL || '',
   HTTP_URL: process.env.RPC_HTTP_URL || '',
   CHAIN_NAME: process.env.CHAIN_NAME || 'base',
   EXPLORER_BASE: process.env.EXPLORER_BASE || 'https://basescan.org',
@@ -254,10 +253,13 @@ export const CONFIG = {
   
   DEDUPE_TTL_MS: parseInt(process.env.DEDUPE_TTL_MS || String(24 * 60 * 60 * 1000), 10),
   NODE_ENV: process.env.NODE_ENV || 'production',
+  
+  // Polling interval (default 5 minutes) - replaces WebSocket
+  POLL_INTERVAL_MS: parseInt(process.env.POLL_INTERVAL_MS || '300000', 10),
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// NEW: Helper to get state path for a specific chain
+// Helper to get state path for a specific chain
 // ═══════════════════════════════════════════════════════════════════════════
 export function getStatePath(chainKey) {
   return `${STATE_PATH_BASE}/state-${chainKey}.json`;
