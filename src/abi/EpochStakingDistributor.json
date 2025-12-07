@@ -1,0 +1,54 @@
+[
+  {
+    "type": "event",
+    "name": "Staked",
+    "inputs": [
+      { "name": "user", "type": "address", "indexed": true }
+      ,{ "name": "amount", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "StakedFor",
+    "inputs": [
+      { "name": "funder", "type": "address", "indexed": true },
+      { "name": "user", "type": "address", "indexed": true },
+      { "name": "amount", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Unstaked",
+    "inputs": [
+      { "name": "user", "type": "address", "indexed": true },
+      { "name": "amount", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Exited",
+    "inputs": [
+      { "name": "user", "type": "address", "indexed": true },
+      { "name": "amount", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "RewardFunded",
+    "inputs": [
+      { "name": "token", "type": "address", "indexed": true },
+      { "name": "epochId", "type": "uint256", "indexed": true },
+      { "name": "amount", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "RewardClaimed",
+    "inputs": [
+      { "name": "user", "type": "address", "indexed": true },
+      { "name": "token", "type": "address", "indexed": true },
+      { "name": "epochId", "type": "uint256", "indexed": true },
+      { "name": "amount", "type": "uint256", "indexed": false }
+    ]
+  }
+]

@@ -29,8 +29,9 @@ const CHAIN_DEFINITIONS = {
     explorerBase: 'https://basescan.org',
     llamaChain: 'base',
     rewardSwapper: '0x25f11f947309df89bf4d36da5d9a9fb5f1e186c1',
-    // Base-specific: also monitor Vault and Pools
+    // Base-specific: also monitor Vault, Staking, and Pools
     vault: process.env.VAULT_ADDRESS || null,
+    stakingDistributor: '0x781a80fa817b5a146c440f03ef8643f4aca6588a',
     pools: [
       { 
         address: '0x08d49DA370ecfFBC4c6Fdd2aE82B2D6aE238Affd', 

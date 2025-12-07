@@ -8,6 +8,7 @@ import { CONFIG } from './config.mjs';
 import vaultAbi from './abi/PermalockVault.json' with { type: 'json' };
 import poolAbi from './abi/AerodromePool.json' with { type: 'json' };
 import swapperAbi from './abi/RewardSwapper.json' with { type: 'json' };
+import stakingAbi from './abi/EpochStakingDistributor.json' with { type: 'json' };
 import { linkTx, linkAddr, prettyArgs, sleep, fmtWei, short, getTokenInfoBatch, fetchPrices, fmtUsd, fmtNumber } from './utils.mjs';
 import { sendTelegram } from './notify/telegram.mjs';
 import { sendDiscord } from './notify/discord.mjs';
@@ -17,6 +18,7 @@ import { createStore, store as legacyStore } from './store.mjs';
 const vaultIface = new ethers.Interface(vaultAbi);
 const poolIface  = new ethers.Interface(poolAbi);
 const swapperIface = new ethers.Interface(swapperAbi);
+const stakingIface = new ethers.Interface(stakingAbi);
 
 /* ---------- Swap signature support (shared) ---------- */
 const TOPIC_V2_CLASSIC = ethers.id('Swap(address,uint256,uint256,uint256,uint256,address)');
@@ -24,6 +26,14 @@ const TOPIC_V2_ALT     = ethers.id('Swap(address,address,uint256,uint256,uint256
 const TOPIC_V3         = ethers.id('Swap(address,address,int256,int256,uint160,uint128,int24)');
 const TOPIC_PLAN_EXECUTED = ethers.id('PlanExecuted(address,address,uint256,uint256)');
 const TOPIC_SWAP_EXECUTED = ethers.id('SwapExecuted(uint8,address,address,uint256,uint256)');
+
+// Staking events
+const TOPIC_STAKED = ethers.id('Staked(address,uint256)');
+const TOPIC_STAKED_FOR = ethers.id('StakedFor(address,address,uint256)');
+const TOPIC_UNSTAKED = ethers.id('Unstaked(address,uint256)');
+const TOPIC_EXITED = ethers.id('Exited(address,uint256)');
+const TOPIC_REWARD_FUNDED = ethers.id('RewardFunded(address,uint256,uint256)');
+const TOPIC_REWARD_CLAIMED = ethers.id('RewardClaimed(address,address,uint256,uint256)');
 
 const coder = ethers.AbiCoder.defaultAbiCoder();
 const addrFromTopic = (t) => ethers.getAddress(ethers.dataSlice(t, 12));
@@ -151,6 +161,40 @@ function formatPlanExecutedEvent({ caller, recipient, steps, totalOutAmt, swaps,
   return `${tsLine}${header}\n${body}${footer}`;
 }
 
+function formatStakingEvent(eventName, argsObj, txHash, address, blockNumber, explorerBase, chainEmoji, chainName) {
+  const header = `${chainEmoji} **${eventName}** on *iAERO Staking* (${chainName})\n`;
+  
+  let body = '';
+  
+  // Format based on event type
+  if (eventName === 'Staked' || eventName === 'Unstaked' || eventName === 'Exited') {
+    const amount = argsObj.amount ? fmtNumber(Number(ethers.formatUnits(argsObj.amount, 18)), 4) : '?';
+    const user = argsObj.user || '?';
+    const action = eventName === 'Staked' ? '📥 Staked' : eventName === 'Unstaked' ? '📤 Unstaked' : '🚪 Exited';
+    body = `${action}: **${amount} iAERO**\n• User: \`${short(user)}\``;
+  } else if (eventName === 'StakedFor') {
+    const amount = argsObj.amount ? fmtNumber(Number(ethers.formatUnits(argsObj.amount, 18)), 4) : '?';
+    const funder = argsObj.funder || '?';
+    const user = argsObj.user || '?';
+    body = `📥 Staked: **${amount} iAERO**\n• Funder: \`${short(funder)}\`\n• User: \`${short(user)}\``;
+  } else if (eventName === 'RewardFunded') {
+    const amount = argsObj.amount ? fmtNumber(Number(ethers.formatUnits(argsObj.amount, 18)), 4) : '?';
+    const token = argsObj.token || '?';
+    const epochId = argsObj.epochId ? Number(argsObj.epochId) : '?';
+    body = `💰 Funded: **${amount}** tokens\n• Token: \`${short(token)}\`\n• Epoch: ${epochId}`;
+  } else if (eventName === 'RewardClaimed') {
+    const amount = argsObj.amount ? fmtNumber(Number(ethers.formatUnits(argsObj.amount, 18)), 4) : '?';
+    const user = argsObj.user || '?';
+    const token = argsObj.token || '?';
+    body = `🎁 Claimed: **${amount}** tokens\n• User: \`${short(user)}\`\n• Token: \`${short(token)}\``;
+  } else {
+    body = prettyArgs(argsObj);
+  }
+  
+  const footer = `\n🔗 Tx: ${linkTx(explorerBase, txHash)}\n🏷️ Contract: ${linkAddr(explorerBase, address)}\n🧱 Block: ${blockNumber}`;
+  return `${header}\n${body}\n${footer}`;
+}
+
 const keyOf = (log) => `${log.transactionHash}:${log.logIndex}`;
 
 function buildArgsObjFromAbiParsed(parsed) {
@@ -187,6 +231,7 @@ export async function startWatcher(chainConfig = null) {
   const vault = isMultiChain ? (chainConfig.vault || null) : (CONFIG.VAULT || null);
   const pools = isMultiChain ? (chainConfig.pools || []) : (CONFIG.POOLS || []);
   const stablecoins = isMultiChain ? (chainConfig.stablecoins || {}) : (CONFIG.STABLECOINS || {});
+  const stakingDistributor = isMultiChain ? (chainConfig.stakingDistributor || null) : null;
   
   const tag = `[${chainEmoji} ${chainName}]`;
   
@@ -301,6 +346,43 @@ export async function startWatcher(chainConfig = null) {
       await notifyAll(msg);
       store.markIfNew(k, blockNumber);
     } catch {
+      return;
+    }
+  }
+
+  async function handleStakingLog(http, log) {
+    const k = keyOf(log);
+
+    if (!(await hasEnoughConf(http, log))) {
+      enqueuePending(log, 'staking', null);
+      return;
+    }
+    if (!(await shouldProcess(http, log))) return;
+
+    const { transactionHash, blockNumber, topics, data, address } = log;
+
+    // Check if it's a staking event we care about
+    const topic0 = topics[0];
+    const isStakingEvent = [
+      TOPIC_STAKED, TOPIC_STAKED_FOR, TOPIC_UNSTAKED, 
+      TOPIC_EXITED, TOPIC_REWARD_FUNDED, TOPIC_REWARD_CLAIMED
+    ].includes(topic0);
+    
+    if (!isStakingEvent) return;
+
+    try {
+      const parsed = stakingIface.parseLog({ topics, data });
+      if (!parsed) return;
+      
+      const argsObj = buildArgsObjFromAbiParsed(parsed);
+      const blk = await http.getBlock(blockNumber).catch(() => null);
+      const tsLine = blk ? `🕐 ${new Date(blk.timestamp * 1000).toISOString()}\n` : '';
+      const msg = `${tsLine}${formatStakingEvent(parsed.name, argsObj, transactionHash, address, blockNumber, explorerBase, chainEmoji, chainName)}`;
+      console.log(`${tag} [Notify Staking]`, parsed.name, transactionHash);
+      await notifyAll(msg);
+      store.markIfNew(k, blockNumber);
+    } catch (e) {
+      console.error(`${tag} [Staking] Error:`, e?.message || e);
       return;
     }
   }
@@ -461,6 +543,7 @@ export async function startWatcher(chainConfig = null) {
           for (const log of logs) {
             if (contractTypes[i] === 'pool') await handlePoolLog(http, log, poolNames[i]);
             else if (contractTypes[i] === 'swapper') await handleSwapperLog(http, log);
+            else if (contractTypes[i] === 'staking') await handleStakingLog(http, log);
             else await handleVaultLog(http, log);
             await sleep(50);
           }
@@ -499,6 +582,7 @@ export async function startWatcher(chainConfig = null) {
           for (const log of logs) {
             if (contractTypes[i] === 'pool') await handlePoolLog(http, log, poolNames[i]);
             else if (contractTypes[i] === 'swapper') await handleSwapperLog(http, log);
+            else if (contractTypes[i] === 'staking') await handleStakingLog(http, log);
             else await handleVaultLog(http, log);
             await sleep(20);
           }
@@ -515,9 +599,10 @@ export async function startWatcher(chainConfig = null) {
   // ─────────────────────────────────────────────────────────────────────────
   const swapperAddress = ethers.getAddress(rewardSwapper);
   const vaultAddress = vault ? ethers.getAddress(vault) : null;
+  const stakingAddress = stakingDistributor ? ethers.getAddress(stakingDistributor) : null;
   const poolAddresses = pools.map(p => ethers.getAddress(p.address));
   
-  // Build address list - always include swapper, optionally vault and pools
+  // Build address list - always include swapper, optionally vault, staking, and pools
   const allAddresses = [swapperAddress];
   const contractTypes = ['swapper'];
   const poolNames = [null];
@@ -525,6 +610,12 @@ export async function startWatcher(chainConfig = null) {
   if (vaultAddress) {
     allAddresses.push(vaultAddress);
     contractTypes.push('vault');
+    poolNames.push(null);
+  }
+  
+  if (stakingAddress) {
+    allAddresses.push(stakingAddress);
+    contractTypes.push('staking');
     poolNames.push(null);
   }
   
@@ -537,6 +628,7 @@ export async function startWatcher(chainConfig = null) {
   console.log(`${tag} Monitoring:`);
   console.log(`  Swapper: ${swapperAddress}`);
   if (vaultAddress) console.log(`  Vault:   ${vaultAddress}`);
+  if (stakingAddress) console.log(`  Staking: ${stakingAddress}`);
   for (const p of pools) {
     console.log(`  Pool:    ${p.address} (${p.name})`);
   }
