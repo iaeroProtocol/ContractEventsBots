@@ -39,11 +39,12 @@ const CHAIN_DEFINITIONS = {
         token0: { symbol: 'iAERO', decimals: 18 },
         token1: { symbol: 'AERO', decimals: 18 }
       },
-      { 
-        address: '0x8966379fCD16F7cB6c6EA61077B6c4fAfECa28f4', 
+      {
+        address: '0x8966379fCD16F7cB6c6EA61077B6c4fAfECa28f4',
         name: 'LIQ/USDC',
         token0: { symbol: 'LIQ', decimals: 18 },
-        token1: { symbol: 'USDC', decimals: 6 }
+        token1: { symbol: 'USDC', decimals: 6 },
+        minUsdNotify: 200,
       },
       { 
         address: '0xa1b79a66994878476a9dcb20e50969a7d641229c', 

@@ -312,10 +312,32 @@ export async function startWatcher(chainConfig = null) {
 
     if (!argsObj) return;
 
+    const poolConfig = poolConfigByAddr.get(address.toLowerCase());
+
+    // Per-pool minimum USD filter (uses stablecoin side of the pair)
+    if (poolConfig?.minUsdNotify) {
+      const { amount0In, amount0Out, amount1In, amount1Out } = argsObj;
+      const t0 = poolConfig.token0;
+      const t1 = poolConfig.token1;
+      // Pick whichever token is a stablecoin to estimate USD value
+      let usdValue = 0;
+      if (t1?.symbol === 'USDC' || t1?.symbol === 'USDbC' || t1?.symbol === 'DAI' || t1?.symbol === 'USDT') {
+        const bigger = (amount1In > amount1Out) ? amount1In : amount1Out;
+        usdValue = Number(ethers.formatUnits(bigger, t1.decimals));
+      } else if (t0?.symbol === 'USDC' || t0?.symbol === 'USDbC' || t0?.symbol === 'DAI' || t0?.symbol === 'USDT') {
+        const bigger = (amount0In > amount0Out) ? amount0In : amount0Out;
+        usdValue = Number(ethers.formatUnits(bigger, t0.decimals));
+      }
+      if (usdValue < poolConfig.minUsdNotify) {
+        console.log(`${tag} [Filter] Skipping ${poolName} swap ($${usdValue.toFixed(2)} < $${poolConfig.minUsdNotify}) tx=${transactionHash}`);
+        store.markIfNew(k, blockNumber);
+        return;
+      }
+    }
+
     try {
       const blk = await http.getBlock(blockNumber).catch(() => null);
       const tsLine = blk ? `🕐 ${new Date(blk.timestamp * 1000).toISOString()}\n` : '';
-      const poolConfig = poolConfigByAddr.get(address.toLowerCase());
       const msg = `${tsLine}${formatSwapEvent(poolConfig, argsObj, transactionHash, address, blockNumber, explorerBase, chainEmoji, chainName)}`;
       console.log(`${tag} [Notify Swap]`, transactionHash);
       await notifyAll(msg);
