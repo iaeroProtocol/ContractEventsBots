@@ -44,7 +44,7 @@ const CHAIN_DEFINITIONS = {
         name: 'LIQ/USDC',
         token0: { symbol: 'LIQ', decimals: 18 },
         token1: { symbol: 'USDC', decimals: 6 },
-        minUsdNotify: 200,
+        minUsdNotify: 300,
       },
       { 
         address: '0xa1b79a66994878476a9dcb20e50969a7d641229c', 
