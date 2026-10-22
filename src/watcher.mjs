@@ -195,7 +195,8 @@ function formatStakingEvent(eventName, argsObj, txHash, address, blockNumber, ex
   return `${header}\n${body}\n${footer}`;
 }
 
-const keyOf = (log) => `${log.transactionHash}:${log.logIndex}`;
+// ethers v6 Log exposes the log index as `.index` (`.logIndex` is undefined, which keyed every log by tx only)
+const keyOf = (log) => `${log.transactionHash}:${log.index ?? log.logIndex}`;
 
 function buildArgsObjFromAbiParsed(parsed) {
   const argsObj = {};
@@ -281,15 +282,17 @@ export async function startWatcher(chainConfig = null) {
 
   // ─────────────────────────────────────────────────────────────────────────
   // Event handlers (use chain-specific context)
+  // Each returns true when the log is settled (alerted, filtered or not ours) and false when it
+  // was not handled and the sweep must not move the watermark past it.
   // ─────────────────────────────────────────────────────────────────────────
   async function handlePoolLog(http, log, poolName) {
     const k = keyOf(log);
 
     if (!(await hasEnoughConf(http, log))) {
       enqueuePending(log, 'pool', poolName);
-      return;
+      return false;
     }
-    if (!(await shouldProcess(http, log))) return;
+    if (!(await shouldProcess(http, log))) return true;
 
     const { transactionHash, blockNumber, topics, data, address } = log;
 
@@ -310,7 +313,7 @@ export async function startWatcher(chainConfig = null) {
       }
     }
 
-    if (!argsObj) return;
+    if (!argsObj) return true;
 
     const poolConfig = poolConfigByAddr.get(address.toLowerCase());
 
@@ -330,8 +333,8 @@ export async function startWatcher(chainConfig = null) {
       }
       if (usdValue < poolConfig.minUsdNotify) {
         console.log(`${tag} [Filter] Skipping ${poolName} swap ($${usdValue.toFixed(2)} < $${poolConfig.minUsdNotify}) tx=${transactionHash}`);
-        store.markIfNew(k, blockNumber);
-        return;
+        store.markIfNew(k);
+        return true;
       }
     }
 
@@ -341,10 +344,11 @@ export async function startWatcher(chainConfig = null) {
       const msg = `${tsLine}${formatSwapEvent(poolConfig, argsObj, transactionHash, address, blockNumber, explorerBase, chainEmoji, chainName)}`;
       console.log(`${tag} [Notify Swap]`, transactionHash);
       await notifyAll(msg);
-      store.markIfNew(k, blockNumber);
+      store.markIfNew(k);
     } catch (e) {
       console.error(`${tag} [Notify error]`, e?.message || e);
     }
+    return true;
   }
 
   async function handleVaultLog(http, log) {
@@ -352,9 +356,9 @@ export async function startWatcher(chainConfig = null) {
 
     if (!(await hasEnoughConf(http, log))) {
       enqueuePending(log, 'vault', null);
-      return;
+      return false;
     }
-    if (!(await shouldProcess(http, log))) return;
+    if (!(await shouldProcess(http, log))) return true;
 
     const { transactionHash, blockNumber, topics, data, address } = log;
 
@@ -366,10 +370,11 @@ export async function startWatcher(chainConfig = null) {
       const msg = `${tsLine}${formatVaultEvent(parsed.name, argsObj, transactionHash, address, blockNumber, explorerBase, chainEmoji, chainName)}`;
       console.log(`${tag} [Notify Vault]`, parsed.name, transactionHash);
       await notifyAll(msg);
-      store.markIfNew(k, blockNumber);
+      store.markIfNew(k);
     } catch {
-      return;
+      // not an event in the vault ABI
     }
+    return true;
   }
 
   async function handleStakingLog(http, log) {
@@ -377,9 +382,9 @@ export async function startWatcher(chainConfig = null) {
 
     if (!(await hasEnoughConf(http, log))) {
       enqueuePending(log, 'staking', null);
-      return;
+      return false;
     }
-    if (!(await shouldProcess(http, log))) return;
+    if (!(await shouldProcess(http, log))) return true;
 
     const { transactionHash, blockNumber, topics, data, address } = log;
 
@@ -390,11 +395,11 @@ export async function startWatcher(chainConfig = null) {
       TOPIC_EXITED, TOPIC_REWARD_FUNDED, TOPIC_REWARD_CLAIMED
     ].includes(topic0);
     
-    if (!isStakingEvent) return;
+    if (!isStakingEvent) return true;
 
     try {
       const parsed = stakingIface.parseLog({ topics, data });
-      if (!parsed) return;
+      if (!parsed) return true;
       
       const argsObj = buildArgsObjFromAbiParsed(parsed);
       const blk = await http.getBlock(blockNumber).catch(() => null);
@@ -402,11 +407,11 @@ export async function startWatcher(chainConfig = null) {
       const msg = `${tsLine}${formatStakingEvent(parsed.name, argsObj, transactionHash, address, blockNumber, explorerBase, chainEmoji, chainName)}`;
       console.log(`${tag} [Notify Staking]`, parsed.name, transactionHash);
       await notifyAll(msg);
-      store.markIfNew(k, blockNumber);
+      store.markIfNew(k);
     } catch (e) {
       console.error(`${tag} [Staking] Error:`, e?.message || e);
-      return;
     }
+    return true;
   }
 
   async function handleSwapperLog(http, log) {
@@ -414,20 +419,20 @@ export async function startWatcher(chainConfig = null) {
 
     if (!(await hasEnoughConf(http, log))) {
       enqueuePending(log, 'swapper', null);
-      return;
+      return false;
     }
     
-    if (store.has(k)) return;
+    if (store.has(k)) return true;
 
     const { transactionHash, blockNumber, topics, data, address } = log;
 
     if (topics[0] !== TOPIC_PLAN_EXECUTED) {
-      return;
+      return true;
     }
 
     try {
       const parsed = swapperIface.parseLog({ topics, data });
-      if (parsed?.name !== 'PlanExecuted') return;
+      if (parsed?.name !== 'PlanExecuted') return true;
 
       const caller = parsed.args[0];
       const recipient = parsed.args[1];
@@ -523,10 +528,13 @@ export async function startWatcher(chainConfig = null) {
 
       console.log(`${tag} [Notify Swapper]`, transactionHash, `$${totalUsd.toFixed(2)}`);
       await notifyAll(msg);
-      store.markIfNew(k, blockNumber);
+      store.markIfNew(k);
+      return true;
 
     } catch (e) {
+      // receipt/RPC failure: leave the window open so the next sweep retries this alert
       console.error(`${tag} [Swapper] Error handling PlanExecuted:`, e?.message || e);
+      return false;
     }
   }
 
@@ -535,7 +543,19 @@ export async function startWatcher(chainConfig = null) {
   // FIXED: Chunk requests to respect RPC block limits (e.g., Avalanche 10k, Alchemy 10k)
   // ─────────────────────────────────────────────────────────────────────────
   const BACKFILL_CHUNK_SIZE = 2000; // Safe for all RPCs
-  
+
+  // Returns the handler's settled flag (false = retry this log in a later sweep)
+  async function dispatchLog(http, log, contractType, poolName) {
+    if (contractType === 'pool') return handlePoolLog(http, log, poolName);
+    if (contractType === 'swapper') return handleSwapperLog(http, log);
+    if (contractType === 'staking') return handleStakingLog(http, log);
+    return handleVaultLog(http, log);
+  }
+
+  // The watermark only moves to the end of a range once every chunk of every address in it was read
+  // and every log settled. Logs are read address by address, so moving it per alert (or past a failed
+  // chunk) skipped other addresses' logs for good. A retried range re-reads logs already alerted;
+  // store.seen (keyed tx:logIndex) stops them posting twice.
   async function backfill(http, addresses, contractTypes, poolNames) {
     let latest = await http.getBlockNumber();
     if (CONFIG.CONFIRMATIONS > 0) latest -= CONFIG.CONFIRMATIONS;
@@ -544,9 +564,12 @@ export async function startWatcher(chainConfig = null) {
     const fromBackfill = CONFIG.BACKFILL_BLOCKS > 0 ? Math.max(0, latest - CONFIG.BACKFILL_BLOCKS) : latest;
     const start = Math.max(fromWatermark, fromBackfill);
     if (start >= latest) return;
+    // Blocks before `start` are outside the backfill window by design; a failed backfill is retried from here
+    store.setWatermark(start - 1);
 
     const totalBlocks = latest - start;
     console.log(`${tag} [Backfill] from ${start} to ${latest} (${totalBlocks} blocks)…`);
+    let allOk = true;
     
     for (let i = 0; i < addresses.length; i++) {
       let totalLogs = 0;
@@ -563,16 +586,14 @@ export async function startWatcher(chainConfig = null) {
           });
           
           for (const log of logs) {
-            if (contractTypes[i] === 'pool') await handlePoolLog(http, log, poolNames[i]);
-            else if (contractTypes[i] === 'swapper') await handleSwapperLog(http, log);
-            else if (contractTypes[i] === 'staking') await handleStakingLog(http, log);
-            else await handleVaultLog(http, log);
+            if (!(await dispatchLog(http, log, contractTypes[i], poolNames[i]))) allOk = false;
             await sleep(50);
           }
           totalLogs += logs.length;
         } catch (e) {
           console.error(`${tag} [Backfill] chunk ${chunkStart}-${chunkEnd} failed:`, e?.message || e);
-          // Continue with next chunk rather than failing entirely
+          // Continue with next chunk rather than failing entirely; the watermark stays put for a retry
+          allOk = false;
         }
         
         // Small delay between chunks to avoid rate limiting
@@ -581,13 +602,14 @@ export async function startWatcher(chainConfig = null) {
       
       console.log(`${tag} [Backfill] ${addresses[i]} done (${totalLogs} logs)`);
     }
-    store.setWatermark(latest);
+    if (allOk) store.setWatermark(latest);
+    else console.warn(`${tag} [Backfill] incomplete; next poll retries from block ${store.getWatermark() + 1}`);
   }
 
   async function sweepRange(http, fromBlock, toBlock, addresses, contractTypes, poolNames) {
     // FIXED: Chunk sweep requests too
     const SWEEP_CHUNK_SIZE = 2000;
-    let total = 0;
+    let allOk = true;
     
     for (let i = 0; i < addresses.length; i++) {
       for (let chunkStart = fromBlock; chunkStart <= toBlock; chunkStart += SWEEP_CHUNK_SIZE + 1) {
@@ -599,21 +621,19 @@ export async function startWatcher(chainConfig = null) {
             fromBlock: chunkStart, 
             toBlock: chunkEnd 
           });
-          total += logs.length;
           
           for (const log of logs) {
-            if (contractTypes[i] === 'pool') await handlePoolLog(http, log, poolNames[i]);
-            else if (contractTypes[i] === 'swapper') await handleSwapperLog(http, log);
-            else if (contractTypes[i] === 'staking') await handleStakingLog(http, log);
-            else await handleVaultLog(http, log);
+            if (!(await dispatchLog(http, log, contractTypes[i], poolNames[i]))) allOk = false;
             await sleep(20);
           }
         } catch (e) {
           console.error(`${tag} [Sweep] chunk ${chunkStart}-${chunkEnd} failed:`, e?.message || e);
+          allOk = false;
         }
       }
     }
-    if (total === 0) store.setWatermark(toBlock);
+    if (allOk) store.setWatermark(toBlock);
+    else console.warn(`${tag} [Sweep] ${fromBlock}-${toBlock} incomplete; next poll retries from block ${store.getWatermark() + 1}`);
   }
 
   // ─────────────────────────────────────────────────────────────────────────

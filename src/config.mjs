@@ -32,25 +32,26 @@ const CHAIN_DEFINITIONS = {
     // Base-specific: also monitor Vault, Staking, and Pools
     vault: process.env.VAULT_ADDRESS || null,
     stakingDistributor: '0x781a80fa817b5a146c440f03ef8643f4aca6588a',
+    // Aero pools (2026-10-22 migration). New AERO sorts before iAERO, so token0 = AERO.
     pools: [
       { 
-        address: '0x08d49DA370ecfFBC4c6Fdd2aE82B2D6aE238Affd', 
+        address: '0x72Decb30DFE4F6Cf7Db3ba1D58411dDda5ed903b', 
         name: 'iAERO/AERO',
-        token0: { symbol: 'iAERO', decimals: 18 },
-        token1: { symbol: 'AERO', decimals: 18 }
+        token0: { symbol: 'AERO', decimals: 18 },
+        token1: { symbol: 'iAERO', decimals: 18 }
       },
       {
-        address: '0x8966379fCD16F7cB6c6EA61077B6c4fAfECa28f4',
+        address: '0xE4553d8d7284192ab84346A9C9FFdb69dCE30C71',
         name: 'LIQ/USDC',
         token0: { symbol: 'LIQ', decimals: 18 },
         token1: { symbol: 'USDC', decimals: 6 },
         minUsdNotify: 300,
       },
       { 
-        address: '0xa1b79a66994878476a9dcb20e50969a7d641229c', 
+        address: '0x361D728c97E591Ef47A68CAe2DC5C8ef475608EB', 
         name: 'iAERO/AERO (CL)',
-        token0: { symbol: 'iAERO', decimals: 18 },
-        token1: { symbol: 'AERO', decimals: 18 }
+        token0: { symbol: 'AERO', decimals: 18 },
+        token1: { symbol: 'iAERO', decimals: 18 }
       },
     ],
     stablecoins: {
