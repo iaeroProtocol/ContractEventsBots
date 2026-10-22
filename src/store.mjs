@@ -64,14 +64,13 @@ export function createStore(chainKey) {
       console.log(`${tag} Initialized, watermark=${state.lastProcessedBlock}`);
     },
     
-    markIfNew(key, blockNumber) {
+    // Dedupe only. The watermark moves via setWatermark once a whole block range is processed
+    // (raising it per alert skipped earlier-block logs of addresses read later in the same range).
+    markIfNew(key) {
       const now = Date.now();
       prune(now);
       if (state.seen[key]) return false;
       state.seen[key] = now;
-      if (blockNumber > (state.lastProcessedBlock || 0)) {
-        state.lastProcessedBlock = blockNumber;
-      }
       save();
       return true;
     },
@@ -151,14 +150,11 @@ function legacyPrune(now = Date.now()) {
 // Legacy singleton (for backwards compat if watcher.mjs isn't updated)
 export const store = {
   init() { legacyLoad(); legacyPrune(); legacySave(); },
-  markIfNew(key, blockNumber) {
+  markIfNew(key) {
     const now = Date.now();
     legacyPrune(now);
     if (legacyState.seen[key]) return false;
     legacyState.seen[key] = now;
-    if (blockNumber > (legacyState.lastProcessedBlock || 0)) {
-      legacyState.lastProcessedBlock = blockNumber;
-    }
     legacySave();
     return true;
   },
